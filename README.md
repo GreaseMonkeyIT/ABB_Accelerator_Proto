@@ -55,120 +55,138 @@ The system must collect, analyze, and correlate real-time resource consumption o
 - Technical report describing architecture, pipelines, and methodology
 
 **Benefits**  
-
 - Provides real-time visibility into pod-level resource behavior, preventing performance degradation and downtime
 - Improves reliability through AI-driven anomaly detection, bottleneck identification, and dependency understanding
 
-**Current Status: active build, completed till telemetry layer (P2). Live journal in [BUILD_LOG.md](BUILD_LOG.md).**
+
+**Status**
+
+Active build, currently through the telemetry layer (P2). The factory (L0) and core telemetry (L1) are operational; the aggregator (L2) and the correlation engine kernel (L3) are implemented and unit-tested. See the status table below and the [build log](BUILD_LOG.md).
 
 ---
-## What it answers:
 
-Industrial edge boxes run dozens of interdependent pods sharing CPU, memory, disk, PVCs, and network. When something degrades, `kubectl top` shows us *what* is hot, never *who made it hot*. This tool answers the four operational questions from the problem statement, on stage, in under 30 seconds:
+## Overview
 
-1. **Which pod is causing unexpected CPU spikes?**
-2. **How are PVC I/O patterns linked to pod restarts?**
-3. **Are different services influencing each other's resource consumption?**
-4. **Which workloads need optimization?**
+The system observes per-pod resource behaviour across all namespaces on a single-node cluster and attributes observed degradation to a likely root cause. Detection operates on kernel-level signals (PSI, cgroup metrics, eBPF) and does not require any modification or instrumentation of the observed applications. It is intended to answer four operational questions:
 
-> Monitoring tells you *what* is hot. We tell you *who made it hot, who's next, and what to do* — on one node, offline. The LLM is the spokesperson for a deterministic detective, never the detective.
+1. Which pod is causing unexpected CPU spikes?
+2. How are PVC I/O patterns linked to pod restarts?
+3. Are different services influencing each other's resource consumption?
+4. Which workloads need optimization?
 
-## How it works (L0 → L4)
+## Architecture (L0 to L4)
 
 ```mermaid
 flowchart LR
-  L0["L0 · 15-pod factory<br/>(the observed system)"]
+  L0["L0 · 15-pod factory<br/>(observed system)"]
   L1["L1 · Telemetry<br/>Prometheus·PSI·Loki·eBPF"]
   L2["L2 · Aggregator (Go)<br/>PromQL → JSON events"]
-  L3["L3 · Correlation engine (Py)<br/>5 inference agents · causal graph"]
-  L4["L4 · Ollama narrator + dashboard"]
+  L3["L3 · Correlation engine (Py)<br/>inference agents · causal graph"]
+  L4["L4 · Narrator + dashboard"]
   L0 --> L1 --> L2 --> L3 --> L4
 ```
 
-- **L0 - Factory (observed):** a 15-pod synthetic smart factory (using MQTT telemetry, TimescaleDB, cooling/vision/control pods) that is used to reproduce real failure classes via kernel function: CFS throttling, page-cache writeback, fsync storms, OOM kills. 
-- **L1 - Telemetry (reading directly from said factory):** Prometheus (5s scrape on L0) + kubelet cAdvisor **PSI** (the differentiator here is the kernel ground truth: that a pod is stalled, not just busy) + Loki/Alloy logs + eBPF (Caretta flows, OBI RED latency, Inspektor Gadget block-IO).
-- **L2 - Aggregator (Go):** polls the PromQL pack, normalizes response to a schema-frozen JSON event contract, runs a deterministic threshold engine, serves a 15 minute per-pod ring buffer at `/window`.
-- **L3 - Correlation engine (Python, the heart of our system):** five deterministic inference agents: EWMA+CUSUM changepoint detection, lagged cross-correlation, an evidence gate (statistical strength + physical witness [eBPF/PSI/shared-PVC] + temporal order), explanatory-reach root-cause ranking, and blast-radius forecasting. **No LLMs are being used in the reasoning core**; eliminating hallucinated inferences, and non deterministic responses.
-- **L4 - Language + dashboard:** one local Ollama model turns the verdict by the engine into plain-English remediation (here too, the entire dependence is not on the model, we have a fallback methodology which simply passes on the inferred keyword tags). Next.js dashboard: live React-Flow causal graph, PSI noisy-neighbour heatmap, and scenario console.
+**L0, factory (observed system).** A 15-pod synthetic factory (MQTT telemetry, TimescaleDB, and cooling, vision, and control services) that reproduces representative failure classes (CPU throttling, page-cache writeback, fsync storms, OOM termination) using real kernel mechanisms rather than injected metric values.
 
-## Why it's different
+**L1, telemetry.** Prometheus scrapes the factory namespaces every 5 seconds. Signals include kubelet cAdvisor metrics with Pressure Stall Information (PSI), container logs via Loki and Grafana Alloy, and eBPF-derived data (Caretta network flows, OBI request metrics, Inspektor Gadget block I/O). No application instrumentation is required.
 
-No existing tool covers all five of: multi-resource correlation · automatic dependency map · *causal* root cause · edge/air-gap fit · local-LLM insight. SaaS APMs (Datadog/Dynatrace) phone home; service meshes (Istio/Kiali) see only the wire and miss disk/CPU/PSI interference; Pixie doesn't support K3s; Causely is closed SaaS. We hold the intersection — edge + causal + storage-aware + local AI. Full matrix in [MASTER_PLAN.md](MASTER_PLAN.md) §3.
+**L2, aggregator (Go).** Queries Prometheus on a fixed interval, normalizes the results into a schema-stable JSON event format, applies deterministic threshold rules, and serves a 15-minute per-pod history at `/window`.
+
+**L3, correlation engine (Python).** Five deterministic inference stages: changepoint detection (EWMA and CUSUM), lagged cross-correlation, an evidence gate (statistical strength, a physical witness such as an eBPF link or PSI co-pressure or a shared volume, and temporal ordering), root-cause ranking by explanatory reach, and blast-radius forecasting. No language model is used in this stage.
+
+**L4, language and dashboard.** A local model (Ollama) renders the engine's verdict into a written summary, with a deterministic template fallback when the model is unavailable. The dashboard presents the causal graph, a PSI heatmap, and a scenario console.
 
 ## Repository layout
 
 | Path | Contents |
-|---|---|
-| `workloads/` | 15 L0 pod sources + Dockerfiles |
+|------|----------|
+| `workloads/` | 15 L0 pod sources and Dockerfiles |
 | `deploy/` | Helm umbrella chart (`charts/factory`), `skctl` bootstrap, Prometheus/Loki values |
-| `aggregator/` | L2 Go service + frozen `event.schema.json` + PromQL pack |
-| `correlation/` | L3 engine (`detectors · lagcorr · gate · ranking · pipeline`) + unit tests |
-| `scenarios/` | S0–S5 chaos triggers, runbooks, rehearsal ledger |
-| `appendix/` | Ops scripts: `verify_taps`, `diag_scrape`, `component_check`, `restart_test` |
-| `agents/`, `dashboard/` | L3 agent wiring / L4 frontend (planned) |
-| `MASTER_PLAN · BUILD_GUIDE · BUILD_LOG · EXPLANATIONS` | architecture · build path · decision journal · human narrative |
+| `aggregator/` | L2 Go service, frozen `event.schema.json`, PromQL pack |
+| `correlation/` | L3 engine (`detectors`, `lagcorr`, `gate`, `ranking`, `pipeline`) and unit tests |
+| `scenarios/` | S0–S5 triggers, runbooks, rehearsal ledger |
+| `appendix/` | Operational scripts (`verify_taps`, `diag_scrape`, `component_check`, `restart_test`, `psi_watch`) |
+| `agents/`, `dashboard/` | L3 agent wiring and L4 frontend (planned) |
+| `MASTER_PLAN`, `BUILD_GUIDE`, `BUILD_LOG`, `EXPLANATIONS` | architecture, build path, decision journal, narrative notes |
 
 ## Prerequisites
 
-- Linux **bare-metal or VM** (not WSL2 as a cluster node) — Ubuntu/Xubuntu 24.04+, kernel ≥ 5.15 with `/sys/kernel/btf/vmlinux` (eBPF CO-RE), cgroup v2, `CONFIG_PSI=y`.
-- **K3s v1.34+**: `curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik --kubelet-arg=feature-gates=KubeletPSI=true" sh -`
+- Linux host (bare metal or VM; WSL2 is not supported as a cluster node). Ubuntu or Xubuntu 24.04 or later, kernel 5.15 or newer with `/sys/kernel/btf/vmlinux` present (eBPF CO-RE), cgroup v2, and `CONFIG_PSI=y`.
+- K3s v1.34 or later:
+  ```bash
+  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik --kubelet-arg=feature-gates=KubeletPSI=true" sh -
+  ```
 - `helm`, and `docker` or `nerdctl` for image builds.
-- 16 GB+ RAM (see [MASTER_PLAN.md](MASTER_PLAN.md) §1.7 budget); ~64 GB free disk for the 14-day TimescaleDB window.
+- 16 GB RAM or more (see [MASTER_PLAN.md](MASTER_PLAN.md) §1.7). Approximately 64 GB of free disk for the 14-day TimescaleDB retention window.
 
-Verify the gate: `kubectl get --raw /api/v1/nodes/$(kubectl get no -o name|cut -d/ -f2)/proxy/metrics/cadvisor | grep -m1 container_pressure`
+Confirm the PSI gate:
+```bash
+kubectl get --raw /api/v1/nodes/$(kubectl get no -o name | cut -d/ -f2)/proxy/metrics/cadvisor | grep -m1 container_pressure
+```
 
 ## Build
 
-```bash
-# on the K3s box (needs docker or nerdctl). registry/tag come from chart values: skn/<name>:v0.1
-for d in workloads/*/; do docker build -t skn/$(basename "$d"):v0.1 "$d"; done
-# air-gap: import into K3s containerd so no registry/egress is needed at runtime
-for d in workloads/*/; do docker save skn/$(basename "$d"):v0.1 | sudo k3s ctr images import -; done
+Images are built per workload and imported into the K3s container runtime. The registry prefix and tag are defined in the chart values (`skn/<name>:v0.1`).
 
-make test        # L3 engine unit tests (correlation/ pytest)
-helm lint deploy/charts/factory
+```bash
+make images        # docker build all 15 workloads
+make import        # build, then import into K3s containerd (no registry required at runtime)
+make test          # engine (pytest) and aggregator (go) unit tests
+make charts        # helm lint and template the factory chart
 ```
 
 ## Deploy
 
+Solo mode deploys all components on a single machine.
+
 ```bash
-# solo mode = everything on one box (the product target + demo fallback)
 ./deploy/skctl up --mode solo
-bash appendix/component_check.sh      # P0–P2 component sweep
-bash appendix/verify_taps.sh          # §2.7 telemetry tap gate (--strict once eBPF collectors are in)
+bash appendix/component_check.sh      # P0 to P2 component check
+bash appendix/verify_taps.sh          # telemetry tap check (add --strict once eBPF collectors are installed)
 ```
 
-- **Fleet mode:** run the same installer on each LAN box; the first up becomes the K3s seed, each box flips on its own component switches (`--components core,storage,…`). Co-location travels by pod affinity, not machine names.
-- **Air-gap:** pre-import the image tarball (above); the Ollama model is baked into its image layer; nothing egresses at runtime.
+Fleet mode runs the same installer on each LAN node; the first node up becomes the K3s seed, and each node enables its own component groups (`--components core,storage,...`). Co-location is expressed through pod affinity rather than machine names.
 
-**Operational guardrails (learned the hard way — see BUILD_LOG):**
-- In **solo mode never pass `--components <subset>`** — it's exclusive and disables the unlisted workload groups. Just run `./deploy/skctl up --mode solo` (D-012).
-- All PVCs carry `helm.sh/resource-policy: keep`, so a stray Helm run can't delete your data; to truly wipe a volume, `kubectl delete pvc` by hand.
-- After a Syncthing/cross-machine sync, run `helm template deploy/charts/factory >/dev/null` once before deploying — catches a torn file in seconds.
+For air-gapped operation, pre-import the image tarball, bake the Ollama model into its image layer, and run with no external network access.
 
-## Scenarios (the demo conductor)
+**Operational notes:**
 
-`scenarios/S0–S5` are version-controlled, one-click, resettable Chaos-Mesh CRs / native triggers, each with a runbook and reset:
-**S1** PVC I/O cascade (the hero) · **S2** large-file I/O starvation · **S3** CPU-throttle interference with *no network edge* · **S4** network degradation + retry storm · **S5** memory-leak → OOM loop (forecast before the kernel kills) · **S0** false-positive drill (10 min idle → zero causal edges).
+- In solo mode, do not pass `--components <subset>`. The flag is exclusive and will disable the workload groups that are not listed. Run `./deploy/skctl up --mode solo` (see decision D-012).
+- All PVCs carry `helm.sh/resource-policy: keep`, so a stray Helm operation cannot delete data. To remove a volume deliberately, use `kubectl delete pvc`.
+- After a cross-machine file sync, run `helm template deploy/charts/factory >/dev/null` before deploying, to confirm that no file was truncated in transit.
+
+## Scenarios
+
+Each scenario under `scenarios/` is version-controlled and ships with a runbook and a reset script. Heavy load runs only on trigger.
+
+| ID | Scenario | Mechanism |
+|----|----------|-----------|
+| S0 | Steady-state control | 10 minutes idle; the system should report no causal edges |
+| S1 | PVC I/O contention cascade | Sustained `fio` load on a shared volume |
+| S2 | Large-file I/O starvation | Bulk archive read and write |
+| S3 | CPU throttle interference | CPU-bound burst under a constrained limit, with no network path between the affected pods |
+| S4 | Network degradation and retry amplification | Injected latency on an egress service |
+| S5 | Memory leak and OOM termination | Unbounded growth to the container memory limit |
 
 ## Status
 
 | Phase | State |
-|---|---|
-| P0 environment (kernel/K3s/PSI) | ✅ done |
-| P1 15-pod factory | ✅ done (8h soak clean) |
-| P2 telemetry (Prometheus/Loki up; Alloy + Caretta + OBI next) | 🔵 in progress |
-| P3 aggregator (L2) | 🟡 built + unit-tested; deploy next |
-| P4 correlation engine (L3) | ⚪ planned — math kernel unit-tested (13/13 on synthetic fixtures) |
-| P5 language · P6 dashboard · P7 scenarios · P8 air-gap/demo | ⚪ planned |
+|-------|-------|
+| P0 environment (kernel, K3s, PSI gate) | Complete |
+| P1 factory (15 pods) | Complete (8-hour soak, no unplanned restarts) |
+| P2 telemetry (Prometheus, Loki, eBPF collectors) | In progress |
+| P3 aggregator (L2) | Built and unit-tested; deployment pending |
+| P4 correlation engine (L3) | Planned; math kernel unit-tested (13 of 13 fixtures) |
+| P5 language, P6 dashboard, P7 scenarios, P8 hardening | Planned |
 
 ## Documentation
 
-- **[MASTER_PLAN.md](MASTER_PLAN.md)** — full architecture, design decisions, competitive analysis, demo script.
-- **[BUILD_GUIDE.md](BUILD_GUIDE.md)** — hands-on phase-by-phase build path P0→P8 with done-when gates.
-- **[BUILD_LOG.md](BUILD_LOG.md)** — append-only journal + decision register (D-001…D-013).
-- **[EXPLANATIONS.md](EXPLANATIONS.md)** — narrative "human track" journal.
+- [MASTER_PLAN.md](MASTER_PLAN.md): architecture, design decisions, and methodology.
+- [BUILD_GUIDE.md](BUILD_GUIDE.md): phase-by-phase build path (P0 to P8) with completion criteria.
+- [BUILD_LOG.md](BUILD_LOG.md): append-only build journal and decision register.
+- [EXPLANATIONS.md](EXPLANATIONS.md): narrative notes for non-specialist readers.
 
 ## Team
 
-Soumyadip Das · Shivam Kumar · B Kishan · Aaryan Shyam Pillai — *Theme 2: Beyond monitoring — AI agents for real-time pod resource discovery and dependency mapping.*
+Soumyadip Das, Shivam Kumar, B Kishan, Aaryan Shyam Pillai.
+Theme 2: Beyond monitoring, AI agents for real-time pod resource discovery and dependency mapping.
