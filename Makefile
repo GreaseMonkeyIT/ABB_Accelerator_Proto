@@ -6,7 +6,7 @@ TAG ?= v0.1
 
 help:
 	@echo "make test    - engine (pytest) + aggregator (go) unit tests"
-	@echo "make images  - docker build all 15 workloads as \$$(REG)/<name>:\$$(TAG)"
+	@echo "make images  - docker build all 15 workloads + the aggregator as \$$(REG)/<name>:\$$(TAG)"
 	@echo "make import  - build + import images into K3s containerd (air-gap path)"
 	@echo "make charts  - helm lint + template the factory chart"
 	@echo "make demo    - ./deploy/skctl up --mode solo (deploy on one box)"
@@ -19,9 +19,11 @@ test:
 
 images:
 	@for d in workloads/*/; do n=$$(basename $$d); echo ">> build $$n"; docker build -t $(REG)/$$n:$(TAG) $$d || exit 1; done
+	docker build -t $(REG)/aggregator:$(TAG) aggregator
 
 import: images
 	@for d in workloads/*/; do n=$$(basename $$d); docker save $(REG)/$$n:$(TAG) | sudo k3s ctr images import -; done
+	docker save $(REG)/aggregator:$(TAG) | sudo k3s ctr images import -
 
 charts:
 	helm lint deploy/charts/factory

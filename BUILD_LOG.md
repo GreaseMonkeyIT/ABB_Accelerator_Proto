@@ -272,3 +272,34 @@ What: Operator's rule: **all git runs on the laptop (Git Bash); laptop is the da
 Why: operator chose laptop-master / desktop-runtime for the first push.
 Impact: all commits/pushes from the laptop only; teammates clone from GitHub.
 Links: D-008 (LOG-011); LOG-022 (exec bits); LOG-036 (.gitignore/Makefile); .stignore; .gitattributes.
+
+## LOG-038 · 2026-06-13 · STEP — P3 started: L2 aggregator containerized + deploy wired
+What: Proceeding to P3 (P2 core taps green; the 3 eBPF/Loki reds feed L3/L4, not the L2 aggregator, so they don't block). Added aggregator/Dockerfile (multi-stage, CGO_ENABLED=0 static Go on distroless/static, nonroot, :9000); deploy/aggregator.yaml (Deployment+Service in ns aiops; mounts queries.yaml from an aggregator-queries ConfigMap; PROM_URL → in-cluster Prometheus; /healthz readiness; 100m/96Mi→300m/150Mi per §1.3). skctl `engine` step now: create ns aiops → build the aggregator-queries configmap from aggregator/queries.yaml → `kubectl apply deploy/aggregator.yaml` (correlation engine L3 left as TODO). Makefile images/import now also build/import skn/aggregator:v0.1.
+Verify (sandbox): aggregator builds static (CGO_ENABLED=0 → statically-linked ELF, matches the Dockerfile); deploy/aggregator.yaml = valid Deployment+Service; skctl engine block well-formed (file-tool; mount-tear false EOF again); Makefile tabs OK.
+Why: operator — proceed to P3.
+Impact: operator runs `make import` then `skctl up --mode solo` to deploy. P3 done-when: events flow on a manual S1 within ~10s, silent at idle, /window serves per-pod vectors. latency_p95 stays empty until OBI is up (psi_* drive events meanwhile). Distroless image has no shell → inspect via `kubectl logs` + the API service-proxy (/window, /events).
+Links: BUILD_GUIDE P3; MASTER_PLAN §1.3; aggregator/{main.go,Dockerfile}; deploy/aggregator.yaml; deploy/skctl; LOG-027 (aggregator v1).
+
+## LOG-039 · 2026-06-13 · FIX — eBPF installs made non-fatal in skctl (were aborting the aggregator deploy)
+What: `skctl up --mode solo` never reached the `engine` step (aggregator) because the caretta install failed (`repo caretta not found` — the groundcover helm repo add did not register) and skctl runs under `set -e`, so the script aborted at the caretta line. Fix: alloy/caretta/beyla installs are now `|| echo`-guarded (non-fatal); a flaky or deferred eBPF collector can no longer block the L2/L3/L4 deploys. The caretta repo URL and beyla chart coordinates remain to be confirmed when the eBPF reds are addressed.
+Why: operator's P3 deploy run aborted before the aggregator step.
+Impact: after `docker build`/import of skn/aggregator:v0.1, re-run `skctl up --mode solo`; caretta/beyla now fail non-fatally and the engine step deploys the aggregator to aiops. Then run the P3 verify gate.
+Links: LOG-033 (eBPF wiring); LOG-038 (P3 aggregator); deploy/skctl.
+
+## LOG-040 · 2026-06-13 · NOTE — no OS downgrade needed; caretta error is a helm-repo issue, not kernel 7.0
+What: Operator asked whether to downgrade 26.04→24.04 (kernel 7.0) to fix caretta + the aggregator. No. "repo caretta not found" is a helm chart-repo problem (the groundcover repo URL did not register), unrelated to the kernel; the aggregator-not-deployed was skctl aborting at the caretta line under set -e (fixed in LOG-039). Kernel-7.0 eBPF CO-RE load for Caretta/OBI is still UNTESTED (the install fails before the load is attempted); even if 7.0 were a problem, fallbacks exist (Otterize flows, OBI-via-Alloy, or PSI-only — the core L0–L3 path needs no eBPF, and verify_taps core is green on 7.0). Unblock used: deploy the aggregator directly with kubectl (ns aiops + configmap + apply deploy/aggregator.yaml), bypassing skctl's telemetry block — aggregator now Running, /window serving vectors.
+Why: operator worried a downgrade would wipe the dual-boot setup.
+Impact: stay on Xubuntu 26.04 / kernel 7.0; defer caretta/OBI to the eBPF-reds work.
+Links: LOG-019/020 (26.04/kernel 7.0); LOG-039 (skctl non-fatal); LOG-038 (aggregator).
+
+## LOG-041 · 2026-06-13 · FIX — aggregator emitted no events: PSI was per-container, not per-pod
+What: P3 deploy live (aggregator Running, /window serving per-pod vectors) but /events returned [] on S1. Cause: queries.yaml psi_cpu/mem/io used `rate(container_pressure_*{...})` which returns one series **per container**; a pod's total stall splits across its container series, so no single series crossed 0.20 even though the per-pod sum (what psi_watch showed = 0.22) did. Fix: wrap the three PSI queries in `sum by (namespace, pod) (...)` so the aggregator compares the per-pod stall to the threshold; lowered psi_some_avg 0.20→0.15 for margin (baseline ~0.03, S1 ~0.22). queries.yaml only — no image rebuild; apply = recreate the aggregator-queries configmap + `kubectl rollout restart deploy/aggregator -n aiops`.
+Why: P3 done-when requires events on S1 within ~10s.
+Impact: after configmap update + aggregator restart + an S1, /events should carry a psi_io anomaly_candidate for timescaledb. If still marginal, raise FIO_JOBS (louder S1) or drop the threshold further.
+Links: LOG-038 (P3); LOG-032 (S1 0.22); aggregator/queries.yaml; appendix/psi_watch.sh.
+
+## LOG-042 · 2026-06-13 · STEP — **P3 GATE PASSED: L2 aggregator live, events on S1**
+What: After the per-pod PSI fix (LOG-041) + configmap reload, S1 produced a schema-conformant event from /events: `{v:1, kind:anomaly_candidate, namespace:factory-data, pod:timescaledb-..., signal:psi_io, value:0.268, threshold:0.15, window_s:60}`. /window serves per-pod vectors; idle is silent. The full L0→L1→L2 path now runs live on the cluster: cooling-monitor fio storm → timescaledb shared-disk I/O stall (psi_io 0.268) → aggregator emits the anomaly_candidate. P3 done-when met.
+Why: P3 close.
+Impact: L2 deployed in ns aiops (skn/aggregator:v0.1, configmap-driven queries, /window + /events + /healthz). Next: P4 — deploy the correlation engine to consume /window + /events and draw the S1 causal chain (cooling-monitor → dcim → tsdb → ccr). Still deferred: the 3 P2 eBPF/Loki reds (Caretta/OBI/Alloy).
+Links: LOG-041 (PSI fix); LOG-038 (P3 deploy); BUILD_GUIDE P3 done-when; aggregator/.

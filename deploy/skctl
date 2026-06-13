@@ -30,14 +30,22 @@ up() {
     helm upgrade --install prom prometheus-community/kube-prometheus-stack \
       -n observability -f "$HERE/values/prometheus.yaml"
     helm upgrade --install loki grafana/loki-stack -n observability -f "$HERE/values/loki.yaml"
-    helm upgrade --install alloy grafana/alloy -n observability -f "$HERE/values/alloy.yaml"             # logs -> Loki (P2 step 2)
+    helm upgrade --install alloy grafana/alloy -n observability -f "$HERE/values/alloy.yaml" || echo "  (alloy install issue - logs deferred)"   # logs -> Loki (P2 step 2)
+    # eBPF collectors are deferred/flaky (kernel-7.0, chart coords) - NON-FATAL so they can never block engine/dashboard deploys (LOG-039)
     helm repo add caretta https://groundcover-com.github.io/caretta >/dev/null 2>&1 || true
     helm repo update caretta >/dev/null 2>&1 || true
-    helm upgrade --install caretta caretta/caretta -n caretta --create-namespace -f "$HERE/values/caretta.yaml"   # eBPF flows (P2 step 3)
-    helm upgrade --install beyla grafana/beyla -n observability -f "$HERE/values/beyla.yaml"             # OBI/Beyla RED (P2 step 4); if chart missing, deploy Beyla via Alloy
+    helm upgrade --install caretta caretta/caretta -n caretta --create-namespace -f "$HERE/values/caretta.yaml" || echo "  (caretta install skipped - repo/chart unresolved, deferred eBPF item)"   # P2 step 3
+    helm upgrade --install beyla grafana/beyla -n observability -f "$HERE/values/beyla.yaml" || echo "  (beyla install skipped - chart unresolved, deferred eBPF item)"   # P2 step 4
     echo "P2 eBPF: watch Caretta/OBI load CO-RE on kernel 7.0 (Otterize fallback if not), then: bash appendix/verify_taps.sh --strict"
   fi
-  has engine    && echo "TODO P3/P4: aggregator + correlation engine deploys (images first)"
+  if has engine; then
+    kubectl get ns aiops >/dev/null 2>&1 || kubectl create ns aiops
+    kubectl -n aiops create configmap aggregator-queries \
+      --from-file=queries.yaml="$HERE/../aggregator/queries.yaml" \
+      --dry-run=client -o yaml | kubectl apply -f -
+    kubectl apply -f "$HERE/aggregator.yaml"
+    echo "L2 aggregator deployed to aiops (P3); TODO P4: correlation engine deploy"
+  fi
   has language  && echo "TODO P5: ollama deploy (or OLLAMA_HOST external)"
   has dashboard && echo "TODO P6: dashboard deploy"
   has chaos     && echo "TODO P7: helm install chaos-mesh (containerd socket: /run/k3s/containerd/containerd.sock)"
