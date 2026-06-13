@@ -61,7 +61,7 @@ The system must collect, analyze, and correlate real-time resource consumption o
 
 **Status**
 
-Active build, currently through the telemetry layer (P2). The factory (L0) and core telemetry (L1) are operational; the aggregator (L2) and the correlation engine kernel (L3) are implemented and unit-tested. See the status table below and the [build log](BUILD_LOG.md).
+Active build, currently in the correlation layer (P4). The factory (L0), core telemetry (L1), and aggregator (L2) are operational on the cluster; the correlation engine (L3) is deployed and being tuned. See the status table below and the [build log](BUILD_LOG.md).
 
 ---
 
@@ -175,8 +175,8 @@ Each scenario under `scenarios/` is version-controlled and ships with a runbook 
 | P0 environment (kernel, K3s, PSI gate) | Complete |
 | P1 factory (15 pods) | Complete (8-hour soak, no unplanned restarts) |
 | P2 telemetry (Prometheus, Loki, eBPF collectors) | In progress |
-| P3 aggregator (L2) | Built and unit-tested; deployment pending |
-| P4 correlation engine (L3) | Planned; math kernel unit-tested (13 of 13 fixtures) |
+| P3 aggregator (L2) | Deployed to namespace `aiops`; emits schema-conformant events on S1 |
+| P4 correlation engine (L3) | Engine deployed to `aiops` and polling the aggregator; tuning the S1 causal chain (kernel 13 of 13 fixtures) |
 | P5 language, P6 dashboard, P7 scenarios, P8 hardening | Planned |
 
 ## Documentation
