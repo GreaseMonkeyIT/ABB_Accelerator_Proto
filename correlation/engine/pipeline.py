@@ -35,6 +35,7 @@ def run_pass(
     onset_s: dict[str, float] = {}
     for pod, vec in vectors.items():
         ons = detectors.cusum_onsets(vec)
+        ons = [o for o in ons if abs(o["zpeak"]) >= 3.0]  # ignore weak/spurious onsets (robustness on noisy non-negative signals)
         if not ons:
             continue
         first = ons[0]

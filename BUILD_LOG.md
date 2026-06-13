@@ -303,3 +303,32 @@ What: After the per-pod PSI fix (LOG-041) + configmap reload, S1 produced a sche
 Why: P3 close.
 Impact: L2 deployed in ns aiops (skn/aggregator:v0.1, configmap-driven queries, /window + /events + /healthz). Next: P4 — deploy the correlation engine to consume /window + /events and draw the S1 causal chain (cooling-monitor → dcim → tsdb → ccr). Still deferred: the 3 P2 eBPF/Loki reds (Caretta/OBI/Alloy).
 Links: LOG-041 (PSI fix); LOG-038 (P3 deploy); BUILD_GUIDE P3 done-when; aggregator/.
+
+## LOG-043 · 2026-06-13 · STEP — P4 started: L3 correlation engine service built + wired (chain proven)
+What: Wrapped the engine in correlation/service.py: polls the aggregator's /window (per-pod signal vectors) + /events (anomaly seeds), builds run_pass inputs, serves the CausalGraph at /graph. v0 witness without eBPF: shared_relation from the storage-domain workloads (cooling-monitor/dcim-bridge/log-archiver/timescaledb share one local-path disk), psi_copressure from pods whose recent signal is elevated, ebpf_edges empty until Caretta/OBI land, slo_breach from the aggregator's anomaly_candidate pods. Added correlation/Dockerfile (python:3.12-slim + numpy/scipy/networkx), deploy/engine.yaml (Deployment+Service in aiops, 250m/384Mi→1c/512Mi, pulls the aggregator over HTTP), skctl engine step now applies engine.yaml after the aggregator, Makefile builds skn/correlation-engine:v0.1.
+Engine robustness fix: run_pass took the FIRST cusum onset, but non-negative real signals (psi_io) emit weak ~1σ spurious onsets before the real one → wrong onset time, scrambled temporal gate, zero edges. Now filters onsets to |zpeak|≥3 before taking the first; unit suite stays 13/13.
+Verify (sandbox; real pipeline.py reconstructed past a mount-tear): engine 13/13; service smoke on a mock recent-S1 /window → edges=3, **root=cooling-monitor**, blast=[dcim-bridge, timescaledb], innocent edge-ui excluded. Full /window→engine→causal-graph path works.
+Why: operator — proceed to P4.
+Impact: operator builds skn/correlation-engine:v0.1, `skctl up --mode solo` (or `kubectl apply -f deploy/engine.yaml`), then on an S1 the /graph endpoint should rank cooling-monitor #1 with the chain. Live tuning may need FIO/threshold nudges; dcim-bridge must stall for the full 3-hop chain.
+Links: BUILD_GUIDE P4; correlation/{service.py,Dockerfile,engine/pipeline.py}; deploy/engine.yaml; deploy/skctl; LOG-014 (engine kernel).
+
+## LOG-044 · 2026-06-14 · NOTE — **SESSION HANDOFF** (P4 in progress: engine live, causal chain not yet drawn)
+Session result: P3 CLOSED (L2 aggregator live, schema events on S1, LOG-042). P4 STARTED: L3 correlation-engine built, containerized, deployed to aiops, polling the aggregator, serving /graph (LOG-043). Repo GitHub-ready (LOG-036/037, remote GreaseMonkeyIT/ABB_Accelerator_Proto), README reworded formal, 14-day retention applied (LOG-029/035), S1 demo-grade + faults on-demand (LOG-032/034).
+
+LIVE on the cluster:
+- L0 factory (15 pods) + L1 telemetry-core (Prometheus/PSI/kube-state/node-exporter) — verify_taps core 15/15 green.
+- L2 **aggregator** (skn/aggregator:v0.1, ns aiops) — /window + /events + /healthz; emits anomaly_candidate when psi_io>0.15.
+- L3 **correlation-engine** (skn/correlation-engine:v0.1, ns aiops) — /graph; polls the aggregator every 10s.
+
+**OPEN P4 ISSUE — resume here.** On S1, /graph = `findings=[cooling-monitor (x2), alert-dispatcher], active=3, edges=0, root=none`: the engine detects the SOURCE (cooling-monitor) but the disk VICTIMS (timescaledb, dcim-bridge) never enter findings, so no causal edges form. Intermittent `status=error` mid-storm (likely the 5s urllib /window fetch timing out while the node is disk-saturated; self-recovers).
+Hypothesis: timescaledb's psi_io baseline is NOISY (constant checkpoints), so its S1 onset's |zpeak| sits under the |zpeak|≥3 filter (added LOG-043) → not registered → no victim → no chain. cooling-monitor (clean baseline) registers fine.
+
+NEXT STEPS (exact):
+1. Diagnose in-pod during an S1 (fire S1, sleep ~22s): `kubectl exec -n aiops deploy/correlation-engine -- python -c "import urllib.request,json,numpy as np; from engine import detectors; w=json.load(urllib.request.urlopen('http://aggregator.aiops.svc:9000/window',timeout=5)); [print(n,[(o['idx'],round(o['zpeak'],1)) for o in detectors.cusum_onsets(np.array([x['value'] for x in s]))[:3]]) for n in ['cooling-monitor','timescaledb','dcim-bridge'] for k,s in w.items() if n in k and k.endswith('psi_io') and s]"`. And read the error: `kubectl get --raw .../correlation-engine:9100/proxy/graph | python3 -c "import sys,json;print(json.load(sys.stdin)['meta'])"`.
+2. If timescaledb max>0.15 but zpeak ~2 → lower correlation/engine/pipeline.py `abs(o["zpeak"]) >= 3.0` to 2.0, rebuild+reimport skn/correlation-engine:v0.1, `kubectl rollout restart deploy/correlation-engine -n aiops`, re-run S1. If max is low → S1 needs more FIO_JOBS (mind SSD wear). Optionally raise the _fetch timeout in service.py.
+3. Gate met when /graph ranks cooling-monitor #1 with edges to timescaledb (+dcim) and a blast radius. Then → L4 (Ollama narrator + dashboard, P5/P6).
+
+DEFERRED (P2 eBPF/Loki reds, NOT blockers): caretta install fails (`repo caretta not found`, wrong helm URL; non-fatal in skctl per LOG-039); OBI/Beyla chart coords unconfirmed; alloy CrashLoopBackOff (config/RBAC). They enrich L3 (network map, latency); the PSI causal path works without them.
+
+REMINDERS for whoever resumes: laptop = git master (commit/push there only, LOG-037); desktop = Syncthing runtime (`chmod +x` scripts after sync; `skctl pause` stops SSD writes between sessions). **Any code change needs an image rebuild + `k3s ctr images import`** (init.sql, all main.go/main.py, pipeline.py, service.py are baked into images). After a cross-machine sync, `helm template deploy/charts/factory >/dev/null` before deploying (sync can truncate files mid-write). The laptop still owes a commit of the P4 work (correlation/{service.py,Dockerfile}, deploy/engine.yaml, deploy/skctl, Makefile, engine/pipeline.py fix).
+Links: LOG-042 (P3); LOG-043 (P4 engine); LOG-039 (caretta non-fatal); correlation/{service.py,engine/pipeline.py}; deploy/engine.yaml; tasks #10 (P2 eBPF), #12 (P4 deploy).

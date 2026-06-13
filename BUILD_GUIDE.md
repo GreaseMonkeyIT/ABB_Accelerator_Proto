@@ -125,6 +125,8 @@ P0 env → P1 workloads → P2 telemetry → P3 aggregator → P4 engine → P5 
 
 ## P3 — L2 aggregator (Days 5–6)
 
+**Status: DONE 2026-06-13 (LOG-042).** Deployed to ns `aiops` (`skn/aggregator:v0.1`); on S1 it emits a schema-conformant `anomaly_candidate` (timescaledb psi_io 0.268 > 0.15) and serves per-pod vectors at `/window`.
+
 **Goal:** Go service emitting schema-frozen JSON events + `GET /window` vectors.
 
 **Steps:**
@@ -143,6 +145,8 @@ P0 env → P1 workloads → P2 telemetry → P3 aggregator → P4 engine → P5 
 ---
 
 ## P4 — Correlation & Dependency Engine (Days 6–9) — the heart
+
+**Status: IN PROGRESS (LOG-043/044).** Engine kernel done (13/13). Service (`skn/correlation-engine:v0.1`) deployed to ns `aiops`, serving `/graph`. It detects the S1 source (cooling-monitor) but the disk victims (timescaledb/dcim-bridge) are not registering yet, so the full chain is not drawn. Resume per BUILD_LOG LOG-044.
 
 **Goal:** MASTER_PLAN §1.4 in code: A1–A5 inference agents wired in LangGraph, S1 chain reproduced ≥ 8/10, S0 silent.
 

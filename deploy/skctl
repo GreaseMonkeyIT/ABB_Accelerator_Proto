@@ -44,7 +44,8 @@ up() {
       --from-file=queries.yaml="$HERE/../aggregator/queries.yaml" \
       --dry-run=client -o yaml | kubectl apply -f -
     kubectl apply -f "$HERE/aggregator.yaml"
-    echo "L2 aggregator deployed to aiops (P3); TODO P4: correlation engine deploy"
+    kubectl apply -f "$HERE/engine.yaml"
+    echo "L2 aggregator + L3 correlation engine deployed to aiops (P3/P4)"
   fi
   has language  && echo "TODO P5: ollama deploy (or OLLAMA_HOST external)"
   has dashboard && echo "TODO P6: dashboard deploy"

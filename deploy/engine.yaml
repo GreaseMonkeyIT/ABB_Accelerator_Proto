@@ -1,0 +1,41 @@
+# L3 correlation engine (P4). Pulls the aggregator's /window + /events, runs the
+# deterministic engine, serves the CausalGraph at /graph. Image skn/correlation-engine:v0.1.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: correlation-engine
+  namespace: aiops
+  labels: { app: correlation-engine, tier: aiops }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: correlation-engine } }
+  template:
+    metadata:
+      labels: { app: correlation-engine, tier: aiops }
+    spec:
+      containers:
+        - name: engine
+          image: skn/correlation-engine:v0.1
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 9100 }]
+          env:
+            - { name: WINDOW_URL, value: "http://aggregator.aiops.svc:9000/window" }
+            - { name: EVENTS_URL, value: "http://aggregator.aiops.svc:9000/events" }
+            - { name: ENGINE_SIGNAL, value: "psi_io" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9100 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 250m, memory: 384Mi }
+            limits:   { cpu: "1",  memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: correlation-engine
+  namespace: aiops
+  labels: { app: correlation-engine }
+spec:
+  selector: { app: correlation-engine }
+  ports: [{ name: http, port: 9100, targetPort: 9100 }]
