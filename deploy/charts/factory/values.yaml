@@ -9,13 +9,14 @@ registry: "skn"   # local image prefix; k3s ctr images import for air-gap
 tag: "v0.1"
 
 pvcs:
-  - { name: shared-logs-pvc, namespace: factory-data, size: 5Gi }
-  - { name: tsdb-pvc,        namespace: factory-data, size: 64Gi }  # 14-day raw window (D-013/LOG-029): compression+retention in timescaledb/init.sql. local-path can't resize -> kubectl delete pvc tsdb-pvc then skctl up to grow.
+  - { name: shared-logs-pvc, namespace: factory-data, size: 5Gi, storageClass: slowdisk }   # slowdisk = /dev/sdb HDD (D-014); use local-path on a single-disk box
+  - { name: tsdb-pvc,        namespace: factory-data, size: 64Gi, storageClass: slowdisk }  # slowdisk = /dev/sdb HDD (D-014). 14-day raw window (D-013/LOG-029): compression+retention in timescaledb/init.sql. local-path can't resize -> kubectl delete pvc tsdb-pvc then skctl up to grow.
 
 # Pod roster - MASTER_PLAN 2.2. affinityGroup pins physics-coupled pods to each other (D-005 rule).
 pods:
   - { name: plc-gateway,            group: core,    ns: factory-core, image: plc-gateway,
-      cpu: {req: 50m,  lim: 200m},  mem: {req: 64Mi,  lim: 128Mi} }
+      cpu: {req: 50m,  lim: 200m},  mem: {req: 64Mi,  lim: 128Mi},
+      env: {PLC_PERIOD_MS: "1000"} }   # 1 Hz x200ch = ~200 rows/s: timescaledb idles quiet on the HDD so S1 contention is a clean delta (LOG-055)
   - { name: mqtt-broker,            group: core,    ns: factory-core, image: mqtt-broker, port: 1883,
       cpu: {req: 100m, lim: 500m},  mem: {req: 128Mi, lim: 256Mi} }
   - { name: critical-control-relay, group: core,    ns: factory-core, image: critical-control-relay, port: 8080, httpProbe: true,
@@ -30,7 +31,7 @@ pods:
       cpu: {req: 150m, lim: 500m},  mem: {req: 128Mi, lim: 256Mi} }
   - { name: cooling-monitor,        group: storage, ns: factory-data, image: cooling-monitor, port: 8080,
       cpu: {req: 100m, lim: 300m},  mem: {req: 128Mi, lim: 256Mi},
-      env: {DATA_DIR: /shared/cooling, FIO_SIZE: 512m, FIO_JOBS: "4", FIO_RUNTIME: "45", FIO_FSYNC: "8", FIO_DIRECT: "1"},
+      env: {DATA_DIR: /shared/cooling, FIO_SIZE: 512m, FIO_JOBS: "4", FIO_RUNTIME: "60", FIO_FSYNC: "2", FIO_DIRECT: "1"},  # 60s storm; duration is no longer load-bearing now the engine event-centres (LOG-054). FSYNC=2 = the writer stalls too (LOG-051).
       mounts: [{pvc: shared-logs-pvc, path: /shared}], affinityGroup: storage-domain }
   - { name: dcim-bridge,            group: storage, ns: factory-data, image: dcim-bridge, port: 8080, httpProbe: true,
       cpu: {req: 50m,  lim: 150m},  mem: {req: 64Mi,  lim: 128Mi},

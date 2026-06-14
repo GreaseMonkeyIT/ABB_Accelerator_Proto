@@ -146,7 +146,7 @@ P0 env → P1 workloads → P2 telemetry → P3 aggregator → P4 engine → P5 
 
 ## P4 — Correlation & Dependency Engine (Days 6–9) — the heart
 
-**Status: IN PROGRESS (LOG-043/044).** Engine kernel done (13/13). Service (`skn/correlation-engine:v0.1`) deployed to ns `aiops`, serving `/graph`. It detects the S1 source (cooling-monitor) but the disk victims (timescaledb/dcim-bridge) are not registering yet, so the full chain is not drawn. Resume per BUILD_LOG LOG-044.
+**Status: DONE 2026-06-14 (LOG-056).** Engine kernel 13/13; service (`skn/correlation-engine:v0.1`, ns `aiops`, `/graph`). On S1 it ranks the source **cooling-monitor #1** with a threshold-free causal edge to the victim **timescaledb** (`r=0.69, lag=30s, evidence=[stat, pvc, temporal]`) plus a blast radius. How it got robust: detection scans the FULL ring and correlation is **event-centred** on the detected disturbance (not a fixed recent slice); pairs are admitted by statistical correlation + physical-witness topology (no resource thresholds); `/window` samples are time-aligned by timestamp before correlating; and the DB baseline was quieted (plc-gateway rate cut) so the victim onsets cleanly. Remaining enrichment, not blockers: dcim-bridge as a co-victim, and the OBI latency hop to critical-control-relay.
 
 **Goal:** MASTER_PLAN §1.4 in code: A1–A5 inference agents wired in LangGraph, S1 chain reproduced ≥ 8/10, S0 silent.
 

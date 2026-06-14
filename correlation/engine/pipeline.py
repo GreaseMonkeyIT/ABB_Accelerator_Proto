@@ -21,6 +21,7 @@ def run_pass(
     witness: Witness,
     slo_breach: list[str] | None = None,
     caps: dict[str, float] | None = None,
+    window: int | None = None,
 ) -> dict:
     """One correlation pass.
 
@@ -31,8 +32,13 @@ def run_pass(
     caps: optional {pod: limit} for saturation classification
     """
     caps = caps or {}
+    # Detect over the FULL ring -- search the whole stored series for a disturbance
+    # wherever/whenever it sits, rather than assuming it's in the most recent slice
+    # (the data persists; we locate the event by detection, not by the clock). cusum
+    # also needs a clean pre-event baseline, which only the full ring provides.
     findings: dict[str, dict] = {}
     onset_s: dict[str, float] = {}
+    peak: tuple[float, int] | None = None  # (|zpeak|, idx) of the strongest onset = the event centre
     for pod, vec in vectors.items():
         ons = detectors.cusum_onsets(vec)
         ons = [o for o in ons if abs(o["zpeak"]) >= 3.0]  # ignore weak/spurious onsets (robustness on noisy non-negative signals)
@@ -47,14 +53,32 @@ def run_pass(
             "severity": min(abs(first["zpeak"]) / 10.0, 1.0),
             "n_onsets": len(ons),
         }
+        z = max(abs(o["zpeak"]) for o in ons)
+        if peak is None or z > peak[0]:
+            peak = (z, first["idx"])
 
-    # pair pruning: only pairs where at least one pod has an active finding
+    # Correlate on a slice CENTRED on the detected event, not a fixed recent window:
+    # the storm dominates the slice (so r isn't diluted) and an event minutes old is
+    # still analysed because we found it by detection. Re-detection inside the slice
+    # would fail (event lands before cusum's warmup) -- so we keep the full-ring onsets
+    # and only narrow the correlation. window=None (fixtures) correlates the full ring.
+    cvec = vectors
+    if window and peak is not None:
+        n = len(next(iter(vectors.values())))
+        lo = max(0, min(peak[1] - window // 3, n - window))
+        cvec = {p: v[lo:lo + window] for p, v in vectors.items()}
+
     active = set(findings)
+    disturbed = bool(active)  # is anything anomalous at all?  (idle -> no edges)
     edges: list[dict] = []
     for a, b in itertools.combinations(sorted(vectors), 2):
-        if a not in active and b not in active:
+        # Evaluate a pair if it touches an anomalous pod, or -- once the system is
+        # disturbed -- if the topology says the two are physically coupled. That pulls
+        # a chronically-loaded victim (no clean onset of its own) into the graph by
+        # CORRELATION over a shared disk, never by an absolute resource threshold.
+        if a not in active and b not in active and not (disturbed and witness.kinds(a, b)):
             continue
-        d = best_directed(vectors[a], vectors[b])
+        d = best_directed(cvec[a], cvec[b])
         src, dst = (a, b) if d["forward"] else (b, a)
         edge = accept_edge(src, dst, d["r"], d["lag_s"], d["profile"], witness, onset_s)
         if edge:

@@ -1,64 +1,232 @@
-# EXPLANATIONS — session journal, human register
+# EXPLANATIONS — how the system works, file by file
 
-When Soumyadip asks "explain what we did/are doing," the answer gets logged here, timestamped,
-tied to the question asked. Register (set 2026-06-12): **keep the technical terms — pods, PVC,
-CUSUM, Pearson, eBPF, PSI — but explain in narrative**, the way the pod-mesh walkthrough did
-("the post office every message passes through"). Not spec-dumps, not babytalk. The technical
-references live in MASTER_PLAN.md / BUILD_GUIDE.md / BUILD_LOG.md; this file is the human track.
-Newest entries at the bottom.
+This is the "how it works" reference: the idea, the end-to-end flow, and every significant
+editable file — what it is, what it does, and how it functions. Register: keep the technical
+terms (pod, PVC, PSI, CUSUM, Pearson, eBPF) but explain in narrative. The *decision history*
+(why each choice was made, in order) lives in `BUILD_LOG.md`; the *phase plan* in
+`BUILD_GUIDE.md`; the *architecture spec* in `MASTER_PLAN.md`. This file is the map of the code.
 
 ---
 
-## 2026-06-12 · 11:14 UTC · Q: "explain what we just did" (after the first build + test round; rewritten 11:25 to the corrected register)
+## 1. The idea in one breath
 
-**What the engine is.** Four Python modules in `correlation/` that together answer "who caused this." `detectors.py` watches each pod's signal as a 5-second time series: an EWMA tracks what normal looks like, a CUSUM accumulates drift away from normal and fires only when the drift is *sustained* — giving an onset timestamp accurate to one sample. A classifier then names the shape: burst (rises, returns), leak (keeps climbing), saturation (pinned at a limit), flap (oscillation — restart loops). `lagcorr.py` takes two pods' vectors and computes Pearson r at shifted alignments — 0/5/15/30/60/120s. If cooling-monitor's I/O at time T matches dcim-bridge's write latency at T+15s with r≈0.99, that's a lagged relationship, and the shift direction says who leads. `gate.py` is the discipline: correlation alone never creates an edge — it needs strength at the peak lag *and* a neighboring lag (kills flukes), plus a physical witness (an eBPF-seen connection, PSI showing both pods stalled on the same resource on the same node, or a shared PVC), plus correct temporal order. `ranking.py` scores each pod by how much downstream damage it explains, walking accepted edges forward with decaying weight — top score is the root cause; the same walk yields the blast radius with ETAs.
+A single Kubernetes node runs hundreds of pods sharing one CPU, memory, disk, and set of
+storage volumes. When something slows down, ordinary tools (`kubectl top`, dashboards) show you
+*what* is hot — never *who made it hot* or *who it will hurt next*. We watch the cluster from
+the outside, change nothing inside the applications, and turn raw kernel signals into a causal
+story: *"this pod's disk storm is starving that pod, which is why a third pod misses its
+deadline."* The reasoning is deterministic math. Exactly one language model exists in the whole
+system, and it only writes the final sentence, citing evidence the math already found.
 
-**How we tested it with no cluster.** The engine is pure math on arrays, so it needs honest inputs, not hardware. Every test plants a truth: a step at sample 100 (detector must land within 2 samples), a signal copied and shifted 15s (correlator must recover that exact lag *and* direction), a synthetic S1 — cooling-monitor's burst echoed into dcim → tsdb → ccr at 15/30/30s with an innocent edge-ui placed as bait — and eight pods of pure noise where the only correct output is silence.
+The headline signal is **PSI (Pressure Stall Information)** — a number the Linux kernel keeps
+for every container: the fraction of time a pod is *stalled waiting* for CPU, memory, or I/O.
+Utilization says a pod is "busy"; PSI says it is "suffering." That difference is what lets us
+claim one pod is being *hurt* by another, even when they never talk over the network — the
+blind spot of every service-mesh tool.
 
-**The two bugs the tests caught.** CUSUM measured its noise floor from just 12 samples; on compound-noise signals that under-measures, so ordinary jitter looked like 4-sigma events and the detector hallucinated onsets — the gate then *correctly* rejected the downstream edges because the timestamps were lies. Detector fixed (longer quiet prefix), gate vindicated. And ranking originally used personalized PageRank seeded at the suffering pod — flaw: the seed keeps the restart probability mass, so ccr the *victim* outranked cooling-monitor its *cause*. Replaced with explanatory reach: walk forward from each candidate, sum the symptoms it explains, penalize anyone who's themselves explained from upstream.
+## 2. The shape of the system (L0 → L4)
 
-**The laptop checks (Tier-1).** pytest 13/13 on WSL2 (Python 3.12 vs the build's 3.10 — both ends covered). `helm template` → exactly 28 manifests (13 Deployments, 2 CronJobs, 11 Services, 2 PVCs) — the chart's switch logic, storage-domain podAffinity, and tmpfs volume all render into legal Kubernetes objects. `go build` × 6 first-try — dependencies resolve, code structurally sound.
+```
+ L0  factory (15 pods)        the system we watch — produces REAL faults (fio, OOM, throttle)
+  │   kernel mechanisms
+ L1  telemetry               Prometheus scrapes kubelet/cAdvisor every 5s: PSI, cgroup, eBPF
+  │   PromQL
+ L2  aggregator (Go)         PromQL -> one frozen JSON event shape; 15-min per-pod ring at /window
+  │   /window + /events
+ L3  correlation engine (Py) detect -> correlate -> gate -> rank -> forecast  ==>  /graph
+  │   /graph (causal graph)
+ L4  narrator + dashboard    one local LLM writes the verdict; UI shows the graph + scenarios
+```
 
-**Net position.** L3 verified at unit level, L0 compiles, chart renders, L2 event schema frozen. What remains untestable without a real kernel — PSI, eBPF, genuine disk contention — is exactly what the desktop provides. Queue unchanged: P0 install → P1 images → P2 taps.
+Generation → collection → **interpretation** → presentation. Each layer is independently
+testable, and the contract between layers is a small, stable JSON shape.
 
-## 2026-06-12 · ~11:40 UTC · Q: "so the pods don't exist yet; tested against simulated data?"
+## 3. End-to-end: what happens when you fire S1
 
-Yes. The pods exist as source code + Dockerfiles — verified grammar, never run; no images built, no cluster. The engine was tested against synthetic numpy arrays *shaped like* what the pods are designed to produce (a hand-built cooling-monitor flood, time-delayed copies playing dcim/tsdb/ccr, noise for the innocents). Proven: given honest inputs, the math reaches the right verdict. Not proven: that real telemetry resembles the clean fixtures — real scrapes have jitter and gaps, and the collection pipeline hasn't carried a single live sample. Closure path, in order: replay harness (realistically messy synthetic data through the real L2→L3 contract, still cluster-free), then live fire on the desktop (P4 step 7: real S1 caught ≥8/10 before the engine is "done").
+S1 is "PVC I/O contention cascade." Trace one button-press through the files:
 
-## 2026-06-12 · ~11:50 UTC · Q: "we write code here, sync, changes reflect there, test and improve?"
+1. **`scenarios/S1/trigger.sh`** touches a `FLUSH` flag (or POSTs `:8080/flush`) on
+   **cooling-monitor**.
+2. **`workloads/cooling-monitor/main.py`** sees the flag and runs a real, sustained `fio`
+   storm against `/shared/cooling` — a directory on `shared-logs-pvc`, a volume that lives on
+   the **same physical disk** as the database's `tsdb-pvc`.
+3. The kernel's I/O scheduler does the rest: **timescaledb** — a *different* pod with no network
+   link to cooling-monitor — starts stalling on that saturated disk. Its `psi_io` climbs.
+4. **`aggregator/main.go` (L2)** is polling Prometheus every 5s using
+   **`aggregator/queries.yaml`**; it sums `psi_io` per pod, sees timescaledb cross the
+   threshold, emits an `anomaly_candidate` event (shape frozen by
+   **`aggregator/event.schema.json`**), and keeps the last 15 minutes of every pod's signals in
+   a ring served at `/window`.
+5. **`correlation/service.py` (L3)** polls `/window` and `/events`, time-aligns every pod onto a
+   shared clock, and calls `run_pass`.
+6. **`correlation/engine/pipeline.py`** orchestrates the verdict using the four kernel modules:
+   `detectors.py` finds each pod's onset, `lagcorr.py` measures who-leads-whom, `gate.py`
+   admits an edge only with real evidence, `ranking.py` names the root cause and the blast
+   radius. The result is served at `/graph`.
+7. On a clean run the graph reads: **root = cooling-monitor**, edge **cooling-monitor →
+   timescaledb** (`evidence = [stat, pvc, temporal]`), blast radius = timescaledb. Source
+   correctly blamed, victim correctly predicted, **no resource threshold anywhere in the causal
+   path** — only correlation, shared-disk topology, and time order.
 
-Yes — write here → Syncthing to the desktop in seconds → run against the cluster → results sync back (ledger/test files) or get pasted in chat → fix → repeat. Git keeps history; Syncthing moves the working copy. The one subtlety: sync ≠ deploy for everything. The Python engine runs from source, so sync *is* deploy (seconds). Pods run baked container images — a synced edit touches nothing live until `docker build` + image import + rollout restart (minutes; Makefile wraps it at P1). Go services sit in between: run the binary directly during dev, containerize when stable. Discipline: commits from one side at a time; the desktop treats the folder as runtime, we treat it as the writing desk.
+## 4. The files, layer by layer
 
-## 2026-06-13 · ~00:15 IST · Q: "no restarts is good or bad?" (during P1 soak)
+### L0 — the factory (`workloads/`, one folder per pod, each with its own Dockerfile)
 
-Good — zero restarts is the soak's pass criterion; a healthy factory at rest is boring. The twist: restarts aren't villains, *uninvited* ones are. S5 manufactures OOM-kill restarts (vision-qc leak vs its 512Mi limit) and S1 can restart timescaledb via probe timeouts under disk contention — the engineered "PVC I/O ↔ restarts" link from the problem statement. Restart counters are one of the engine's eight input signals precisely because a restart is a loud symptom. Rule: zero restarts at rest, restarts only on command, every restart explainable.
+The honesty rule for all of L0: **every fault is a real kernel mechanism**, never a faked
+metric. If we injected numbers we'd only be testing our own assumptions; by producing the real
+physics, the tool has to *discover* the story.
 
-## 2026-06-13 · ~14:00 · Q: "from the ground up — which layers are enacted, what's each component, how do they work?"
+- **`plc-gateway/main.go`** — fakes the sensor floor: publishes `PLC_CHANNELS` (200) channels at
+  `1000 / PLC_PERIOD_MS` Hz to MQTT. Both are env-tunable (no rebuild of behaviour, just the
+  values). The publish rate *is* the database's write-load dial: it was cut from 10 Hz to 1 Hz
+  (≈2000 → 200 rows/s) so timescaledb idles with headroom and only stalls under a storm — the
+  precondition for it being a *clean* victim rather than a permanently-saturated one.
+- **`mqtt-broker`** — Mosquitto; the message bus every sensor reading passes through.
+- **`telemetry-ingest/main.py`** — drains `sensors/#` from MQTT and **batch-INSERTs** into
+  TimescaleDB (up to 500 rows or 1s per commit, so ~4 commits/s — deliberately batched). Exposes
+  `ingest_queue_depth`: the queue rises when the DB slows, which is the visible S1 back-pressure.
+- **`timescaledb/init.sql` + Dockerfile** — the `readings` hypertable (ts, topic, payload) with
+  native compression after 1h and a 14-day retention policy (the rolling demo history). Its data
+  lives on `tsdb-pvc`. **init.sql is baked into the image** — changing it needs an image rebuild,
+  not just a redeploy.
+- **`cooling-monitor/main.py`** — steady state: a light thermal journal to `/shared/cooling`. On
+  trigger (FLUSH flag *or* `POST :8080/flush`): a sustained, fsync-heavy `fio` storm, intensity
+  set by env `FIO_SIZE/JOBS/RUNTIME/FSYNC/DIRECT` (no rebuild to retune). This is S1's source.
+- **`dcim-bridge/`** — writes to `/shared/dcim` on the **same** `shared-logs-pvc`; the
+  first-in-line disk victim, and a co-victim in the S1 fan-out.
+- **`critical-control-relay/`** — the latency-sensitive actuator with a 100 ms SLO and an HTTP
+  health probe; the pod every cascade eventually hurts (the 4th hop, via OBI latency).
+- **`safety-interlock/`** — trips to safe-mode if the control relay's heartbeat misses.
+- **`log-archiver/` (CronJob)** — tars logs on demand (S2); **`analytics-batch/` (CronJob)** —
+  CPU-heavy rollups on demand (S3); both `suspend: true` so they fire only on trigger.
+- **`vision-qc/`** — "defect detection"; with `LEAK_ENABLED=true` it grows memory to its limit
+  and the OOM-killer fires (S5).
+- **`notify-gateway/`, `alert-dispatcher/`, `edge-ui/`, `firmware-cache/`** — the edge tier
+  (alerts + kiosk); mostly steady-state ballast, with `firmware-cache` carrying a tmpfs volume.
 
-**What's running vs built.** Two layers are *live on the cluster* — L0 (the factory) and L1 (telemetry, core). L2 (the Go aggregator) and L3's math kernel are *written and unit-tested* but not yet deployed. L4 (local-LLM narrator + dashboard) isn't built. So the **generation→collection** half is real; the **interpretation** half exists as verified code waiting to be plugged in.
+### L1 — telemetry (`deploy/values/`, installed by skctl)
 
-**L0 — the factory (15 pods we watch).** A miniature smart-factory across three namespaces. plc-gateway fakes 200 sensors and publishes to **mqtt-broker** (Mosquitto) at 10 Hz; **telemetry-ingest** drains the broker and batch-INSERTs into **timescaledb** (a 14-day compressed rolling store). **critical-control-relay** is the latency-sensitive actuator with a 100 ms SLO — the pod every cascade eventually hurts; **safety-interlock** trips to safe-mode if CCR's heartbeat misses. The storage trio share one physical disk: **cooling-monitor** journals thermal logs and, on trigger, unleashes the fio storm; **dcim-bridge** writes to the *same* PVC (first victim); **log-archiver** tars on demand. **analytics-batch** does CPU-heavy rollups on demand; **vision-qc** "detects defects" and, on trigger, leaks memory to OOM. The edge tier (alert-dispatcher, notify-gateway, edge-ui, firmware-cache) raises alerts and serves the kiosk. Honesty rule: every fault is a *real kernel mechanism* — fsync storms, CFS throttling, the OOM-killer — never a faked number.
+No application is instrumented; everything is read from the kernel via the kubelet.
 
-**L1 — telemetry (how we watch, zero app instrumentation).** Prometheus scrapes the kubelet's built-in **cAdvisor** every 5 s for per-container CPU, memory, throttling, and — the differentiator — **PSI**: the kernel's own "this pod is *stalled waiting* for CPU/mem/IO" counter. **kube-state-metrics** adds restarts/OOM-reasons/PVC claims; **node-exporter** adds disk-busy + network retransmits. A `channel=truth` tag fences the apps' own metrics out of the engine's view, keeping "zero instrumentation" honest. (The eBPF add-ons — Caretta's who-talks-to-whom map, OBI's request latency, Alloy's log shipping — are installed but not yet emitting; the open kernel-7.0 item.)
+- **`prometheus.yaml`** — kube-prometheus-stack values. Scrapes kubelet **cAdvisor** every 5s
+  for per-container CPU/mem/throttle and the differentiator, **PSI**. A `channel=truth` relabel
+  fences each app's *own* `/metrics` out of the engine's view (keeps "zero instrumentation"
+  honest); Grafana is disabled (a crashloop on this image) and Prometheus runs on emptyDir.
+- **`loki.yaml` + `alloy.yaml`** — log pipeline (Alloy ships pod logs to Loki). Deferred red.
+- **`caretta.yaml` + `beyla.yaml`** — eBPF add-ons: Caretta's who-talks-to-whom service map and
+  OBI/Beyla request latency (the `latency_p95` signal that lights up the control-relay hop).
+  These are the deferred eBPF items — the core L0→L3 causal path needs none of them.
 
-**L2 — aggregator (built, not yet deployed).** A small Go service: runs ~12 PromQL queries every 5 s, normalizes the answers into one frozen JSON "event" shape, raises an `anomaly_candidate` when a signal crosses a threshold, and keeps a 15-minute per-pod history at `/window` for the brain to read.
+### L2 — aggregator (`aggregator/`, Go, deployed to ns `aiops`)
 
-**L3 — engine (math kernel built + unit-tested, not deployed).** The deterministic detective: spot each pod's onset (EWMA+CUSUM), correlate pods at time-lags, **gate** an edge only with physical evidence (PSI co-stall / eBPF link / shared PVC) *and* correct time order, rank the root cause by how much downstream damage it explains, forecast who's next. No LLM in this core.
+The firewall between raw Prometheus text and the brain — the brain never sees a wall of metrics,
+only clean typed events.
 
-**How it works today, proven.** Trigger S1 → cooling-monitor floods the shared disk → the kernel marks **timescaledb** (a *different* pod) IO-stalled → Prometheus scrapes that PSI → we watched timescaledb cross 0.22. The whole chain — fault in L0, seen blind by L1 — works end to end with nothing instrumented inside the apps. L2 would turn that spike into an event; L3 would pin it on cooling-monitor. Those two are coded and tested, next to be wired live.
+- **`main.go`** — every `interval_s` it runs each query in the pack, stamps each sample with the
+  poll time, appends to a per-pod ring (`capN` = 15 min / interval), and on a threshold breach
+  emits an `anomaly_candidate`. Serves `/window` (the ring, for L3), `/events` (recent
+  anomalies), `/healthz`. PSI is summed **per pod** (`sum by (namespace, pod)`), the fix that
+  made events actually fire. *Note for L3:* the ring is a positional append and samples can drift
+  in time across pods — which is why L3 re-aligns them by timestamp (see `service.py`).
+- **`queries.yaml`** — the PromQL "pack": one query per signal (cpu, psi_cpu/mem/io, mem, net,
+  pvc, restarts, latency_p95…) plus the `thresholds` block. ConfigMap-mounted, so editing
+  queries/thresholds needs only a configmap reload + restart, no image rebuild. **These
+  thresholds are an L2 alerting hint only — the L3 causal graph does not depend on them.**
+- **`event.schema.json`** — the FROZEN v1 event contract (`v/kind/ns/pod/signal∈enum/value/
+  zscore/threshold/window_s`). Freezing it lets L2 and L3 evolve independently.
 
-## 2026-06-13 · ~20:00 · Q: "explain from scratch, what ticks / how / why, as I'd tell a judge (up to P3)"
+### L3 — correlation engine (`correlation/`, Python, deployed to ns `aiops`)
 
-**The problem, in one breath.** A single Kubernetes node can run hundreds of pods that all share the same CPU, memory, disk, network, and storage volumes. When something slows down, the usual tools (`kubectl top`, dashboards) show you *what* is hot, never *who made it hot* or *who it will hurt next*. The four questions in the brief (which pod spikes CPU, how PVC I/O links to restarts, are services influencing each other, what to optimize) all need causal reasoning across resources, which raw metrics do not provide.
+The deterministic detective. **No LLM anywhere in this layer.** Five ideas, five files.
 
-**Our idea.** Watch the cluster from the outside, change nothing inside the applications, and turn raw kernel signals into a causal story: "this pod's disk storm is starving that pod, which is why a third pod misses its deadline." The reasoning is deterministic math. Exactly one language model exists in the whole system, and it only writes the final sentence, citing evidence the math already found.
+- **`service.py`** — the I/O shell. Polls `/window` + `/events`, then **`build_inputs`** does the
+  crucial pre-processing: it resamples every pod onto **one shared wall-clock grid by each
+  sample's timestamp** (positional indices drift because PSI is gappy and pods restart), and
+  drops stale/dead pods automatically. It builds the physical-witness sets (which pods share a
+  disk, which are co-stalled), runs `run_pass`, and serves the result at `/graph`. Key env:
+  `ENGINE_SIGNAL` (psi_io), `ANALYSIS_WINDOW` (correlation span), `POLL_S` (grid step).
+- **`engine/detectors.py` (A1)** — changepoints. An **EWMA** tracks "normal"; a **CUSUM**
+  accumulates drift and fires only when it's *sustained*, giving an onset accurate to a sample.
+  `classify` then names the shape — burst (rises, returns), leak (keeps climbing), saturation
+  (pinned at a limit), flap (oscillation/restart loops), shift. Robust σ from a longer quiet
+  prefix so jitter doesn't fake onsets.
+- **`engine/lagcorr.py` (A4)** — who leads whom. Pearson r (Spearman fallback for heavy tails)
+  between two pods at shifted alignments (0/5/15/30/60/120 s); the shift with the strongest |r|
+  is the lag, and its sign is the direction. "cooling-monitor at T matches timescaledb at T+30s"
+  → cooling-monitor leads.
+- **`engine/gate.py` (the false-positive killer)** — an edge enters the graph only if **all
+  three** hold: (1) statistical — |r| ≥ 0.6 at the peak *and* support at an adjacent lag (kills
+  flukes); (2) a **physical witness** — an eBPF link, PSI co-pressure on the same node, or a
+  shared PVC; (3) temporal — the source's onset precedes the victim's, consistent with the lag.
+  Correlation alone never makes an edge.
+- **`engine/ranking.py` (A5)** — root cause by **explanatory reach**: walk accepted edges
+  forward from each candidate with decaying weight, sum how much of the symptom set it explains,
+  penalize anyone who is themselves explained from upstream. Top score = root cause; the same
+  forward walk yields the **blast radius** with ETAs. (Deterministic and narratable — not
+  PageRank, which let the victim outrank its cause.)
+- **`engine/pipeline.py` (`run_pass`, the orchestrator)** — ties it together, and carries the two
+  ideas that made it work on real data:
+  - **Event-centred analysis** — detect across the **full** 15-min ring (find the disturbance
+    *wherever* it sits, with a clean pre-event baseline), then correlate a slice **centred on the
+    detected event**. The data persists in the ring; the calculation *searches* it for the event
+    rather than staring at the last few minutes — so a storm minutes old is still analysed, and
+    the storm dominates the correlation instead of being diluted.
+  - **Threshold-free admission** — a pair is evaluated if it touches an anomalous pod *or* (once
+    something is disturbed) if the topology says the two are physically coupled. That pulls a
+    chronically-loaded victim into the graph by **correlation over a shared disk**, never by an
+    absolute resource limit. `tests/test_engine.py` pins all of this with 13 fixtures.
 
-**L0, the factory we watch.** A 15-pod synthetic smart factory across three namespaces: sensors (plc-gateway) publish over MQTT to a broker; an ingester batches readings into TimescaleDB; a critical-control-relay actuates with a 100 ms deadline; cooling, vision, analytics, and edge services do their jobs. The important part is that every fault it can produce is a *real kernel mechanism*, not a faked number. When we fire the storage fault, cooling-monitor runs a genuine fio disk storm and the kernel's I/O scheduler, page cache, and fsync barriers do the rest; a memory leak really grows until the OOM-killer fires. Why: if we faked the metrics we would only be testing our own assumptions. By producing the real physics, the tool has to *discover* the story the way it would in a real data center.
+### L4 — narration + dashboard (planned, P5/P6)
 
-**L1, telemetry, with zero instrumentation.** Prometheus scrapes the cluster every 5 seconds. The headline signal is PSI (Pressure Stall Information): a number the Linux kernel keeps for every container, the fraction of time a pod is *stalled waiting* for CPU, memory, or I/O. We read it straight from the kubelet's built-in cAdvisor, plus restart and OOM counts from kube-state-metrics and disk and network counters from node-exporter. Nothing is installed into the apps. Why PSI: utilization says a pod is "busy"; PSI says it is "suffering." A pod can be pinned at 100 percent CPU and perfectly healthy. PSI is the difference between working hard and waiting in line, and it is what lets us claim one pod is being *hurt* by another.
+A small local model (Ollama) renders the engine's verdict into a sentence, with a deterministic
+template fallback; the dashboard shows the causal graph, a PSI heatmap, and scenario buttons.
+The **API service** (`api/`, below) is the frontend-agnostic seam that feeds any UI.
 
-**L2, the aggregator, metrics into events.** A small Go service runs about twelve PromQL queries every 5 seconds, sums PSI per pod, compares each signal to a threshold, and emits a structured `anomaly_candidate` event in one frozen JSON shape. It keeps a 15-minute per-pod history that the reasoning layer reads. Why: it is the firewall between raw Prometheus text and the brain. The brain never sees a wall of metrics, only clean typed events, and the threshold step is deterministic, so the same input always gives the same output on stage.
+### Deploy & ops (`deploy/`)
 
-**The live proof we have today.** We press the storage button (S1). cooling-monitor unleashes a 45-second disk storm on a volume it *shares* with the database. Within seconds the kernel reports that TimescaleDB, a *different* pod with no network link to cooling-monitor, is now stalled waiting on that same physical disk: its I/O PSI climbs to 0.27. The aggregator catches it and emits `{kind: anomaly_candidate, pod: timescaledb, signal: psi_io, value: 0.268}`. That one event is the whole thesis in miniature: two pods interfering through a shared disk, with no conversation between them, caught blind from kernel signals alone, nothing instrumented inside either app. That interference class is exactly what service-mesh tools, which only see network traffic, are blind to.
+- **`skctl`** — the one bootstrap script. `up --mode solo` brings up namespaces → the factory
+  Helm chart → telemetry → the L2/L3 deploys, idempotently. Also `pause`/`resume` (idle the
+  factory between sessions) and `down`. In solo mode never pass `--components <subset>` — the
+  flag is exclusive and disables unlisted groups (decision D-012).
+- **`charts/factory/values.yaml`** — the single source of truth for the pod roster (name, group,
+  namespace, image, CPU/mem, env, mounts, affinity), the two PVCs, and every tunable knob
+  (FIO_*, PLC_PERIOD_MS, storageClass). Edit here, not in templates.
+- **`charts/factory/templates/`** — `workloads.yaml` renders each pod/cronjob/service from the
+  values list; `pvcs.yaml` renders the PVCs (storageClass defaults to `local-path`, kept across
+  toggles by `helm.sh/resource-policy: keep`).
+- **`slowdisk.yaml`** — static `local` PVs + a `slowdisk` StorageClass pinning the two factory
+  PVCs to a dedicated spinning disk (`/dev/sdb`), so S1's contention happens on a slow disk where
+  the source actually stalls — while the K3s control plane stays fast on the NVMe.
+- **`aggregator.yaml` / `engine.yaml`** — the L2 and L3 Deployments+Services in ns `aiops`.
+- **`appendix/*.sh`** — read-only diagnostics: `verify_taps` (the telemetry tap gate),
+  `component_check` (P0–P2 sweep), `diag_scrape`, `restart_test`, `psi_watch`.
 
-**What runs vs what is next.** Today the pipeline runs end to end through L2: real fault, kernel report, detection and attribution of the single-pod stall. L3, the correlation engine (already written and unit-tested at 13/13), is next to deploy: it takes the per-pod history and draws the full chain, cooling-monitor to dcim-bridge to TimescaleDB to control-relay, ranks the root cause, and forecasts the next victim. L4 then narrates the verdict with one local model and shows it on a live dashboard with one-click scenario buttons.
+### Scenarios (`scenarios/`)
+
+Each is version-controlled with a runbook + reset, and heavy load runs **only on trigger**:
+S0 (idle — the engine must stay silent), **S1** (PVC I/O contention — the proven chain), S2
+(large-file I/O), S3 (CPU throttle, no network path), S4 (network latency + retries), S5
+(memory leak → OOM).
+
+## 5. Knobs you can turn without an image rebuild
+
+- **Engine:** `ANALYSIS_WINDOW` (correlation span), `ENGINE_SIGNAL`, `POLL_S` — env on
+  `deploy/correlation-engine`.
+- **S1 intensity:** `FIO_JOBS/RUNTIME/FSYNC/SIZE/DIRECT` — cooling-monitor env in `values.yaml`.
+- **DB write load:** `PLC_PERIOD_MS`, `PLC_CHANNELS` — plc-gateway env in `values.yaml`.
+- **L2 thresholds/queries:** `aggregator/queries.yaml` (ConfigMap; reload + restart).
+- Anything baked into an image (init.sql, any `main.py`/`main.go`, `pipeline.py`) needs
+  `docker build` + `k3s ctr images import` + a rollout restart.
+
+## 6. The principles that make it defensible
+
+1. **Zero application instrumentation** — every signal comes from the kernel via the kubelet.
+2. **Real faults, not fake metrics** — fio storms, the OOM-killer, CFS throttling.
+3. **Threshold-free causal path** — edges rest on correlation + physical-witness topology +
+   temporal order, not "value > limit." Resource thresholds exist only as a coarse L2 alert hint.
+4. **Search, don't poll** — the engine locates the disturbance in the stored series by detection,
+   then analyses it; storm duration and check timing stop mattering.
+5. **Deterministic core, one LLM at the edge** — the same input yields the same verdict on stage;
+   the model only narrates evidence the math already produced.
+
+> Decision history and the blow-by-blow of how each of these was arrived at: `BUILD_LOG.md`.

@@ -48,6 +48,8 @@ def best_directed(srcv: np.ndarray, dstv: np.ndarray) -> dict:
     Returns {"forward": bool, "r": float, "lag_s": int, "profile": {lag: r}}
     where forward=True means first argument leads.
     """
+    n = min(len(srcv), len(dstv))  # align unequal-length windows; tail = most recent, so lags stay time-consistent
+    srcv, dstv = np.asarray(srcv)[-n:], np.asarray(dstv)[-n:]
     fwd = lag_profile(srcv, dstv)
     rev = lag_profile(dstv, srcv)
     fbest = max(fwd.items(), key=lambda kv: abs(kv[1]), default=(0, 0.0))

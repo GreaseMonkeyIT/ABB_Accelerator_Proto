@@ -15,6 +15,7 @@ import os
 import threading
 import time
 import urllib.request
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import numpy as np
@@ -28,6 +29,8 @@ SIGNAL     = os.environ.get("ENGINE_SIGNAL", "psi_io")          # representative
 INTERVAL   = int(os.environ.get("ENGINE_INTERVAL", "10"))        # seconds between passes
 PORT       = int(os.environ.get("ENGINE_PORT", "9100"))
 COPR_MIN   = float(os.environ.get("COPRESSURE_MIN", "0.10"))     # signal level that counts as "stalled"
+ANALYSIS_WINDOW = int(os.environ.get("ANALYSIS_WINDOW", "36"))   # samples (~3min): the WHOLE pass (detect+correlate+order) looks back over the recent disturbance, not the 15-min ring. Match to event timescale; not a resource limit.
+GRID_STEP_S = float(os.environ.get("POLL_S", "5"))               # aggregator scrape cadence = the time-alignment grid step (resample all pods onto a shared wall-clock axis)
 STORAGE    = [s.strip() for s in os.environ.get(
     "STORAGE_WORKLOADS", "cooling-monitor,dcim-bridge,log-archiver,timescaledb").split(",")]
 
@@ -36,7 +39,7 @@ _graph = {"meta": {"status": "starting"}}
 
 
 def _fetch(url):
-    with urllib.request.urlopen(url, timeout=5) as r:
+    with urllib.request.urlopen(url, timeout=10) as r:
         return json.load(r)
 
 
@@ -46,16 +49,47 @@ def workload(pod):
     return "-".join(parts[:-2]) if len(parts) > 2 else pod
 
 
+def _epoch(ts):
+    """Aggregator stamps each sample with its poll time (Go RFC3339). -> epoch seconds, or None."""
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
 def build_inputs(window, events):
-    """window: {ns/pod/signal: [{ts,pod,namespace,signal,value}, ...]}  ->  (vectors, witness, breach)."""
-    vectors = {}
+    """window: {ns/pod/signal: [{ts,value,...}]}  ->  (vectors, witness, breach), TIME-ALIGNED.
+
+    The aggregator ring is a positional append, but psi_io is gappy and pods restart,
+    so column i drifts across pods (one pod's sample #100 can be a minute off another's).
+    Resample every pod onto ONE shared wall-clock grid by its `ts`, so column k is the
+    same instant for all pods -- the precondition lagged cross-correlation assumes.
+    Stale pods (last sample older than the grid) drop out for free (retires LOG-048).
+    """
+    step, n = GRID_STEP_S, 180
+    raw, latest = {}, 0.0
     for key, samples in window.items():
         parts = key.split("/")
         if len(parts) < 3 or parts[-1] != SIGNAL or not samples:
             continue
-        vals = [s["value"] for s in samples]
-        if len(vals) >= 12:
-            vectors[parts[1]] = np.asarray(vals, dtype=float)
+        pts = sorted((t, s["value"]) for s in samples if (t := _epoch(s.get("ts"))) is not None)
+        if len(pts) >= 12:
+            raw[parts[1]] = pts
+            latest = max(latest, pts[-1][0])
+
+    grid = [latest - step * (n - 1 - k) for k in range(n)]
+    vectors = {}
+    for pod, pts in raw.items():
+        if pts[-1][0] < latest - 2 * step:           # stale/dead pod -> drop (no recent data)
+            continue
+        vec, j = np.full(n, np.nan), 0
+        for k, gt in enumerate(grid):                # sample-and-hold onto the shared grid
+            while j + 1 < len(pts) and pts[j + 1][0] <= gt + step / 2:
+                j += 1
+            if abs(pts[j][0] - gt) <= step:
+                vec[k] = pts[j][1]
+        if np.count_nonzero(~np.isnan(vec)) >= 12:   # real coverage; psi_io gap == no stall == 0
+            vectors[pod] = np.nan_to_num(vec, nan=0.0)
 
     pods = list(vectors)
     shared, copr = set(), set()
@@ -82,7 +116,7 @@ def loop():
             events = _fetch(EVENTS_URL)
             vectors, witness, breach = build_inputs(window, events)
             if vectors:
-                out = run_pass(vectors, witness, slo_breach=breach or None)
+                out = run_pass(vectors, witness, slo_breach=breach or None, window=ANALYSIS_WINDOW)
                 out["meta"]["signal"] = SIGNAL
                 out["meta"]["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 with _lock:
