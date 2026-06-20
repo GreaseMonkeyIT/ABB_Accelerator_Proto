@@ -2,7 +2,10 @@
 
 An edge enters the causal graph only if ALL THREE clauses hold:
   1. statistical: |r| >= R_PEAK at peak AND elevated at an adjacent lag window
-  2. physical witness: ebpf | psi (same node) | pvc/same-node relation
+  2. physical COUPLING: the two pods must share a real resource -- a shared
+     disk/PVC (pvc) or a network dependency (ebpf). Mere PSI co-pressure (both
+     stalling on the box at the same time) is NOT coupling -- it's symptom
+     coincidence -- so psi alone can never form an edge; it only corroborates.
   3. temporal: src onset precedes dst onset, consistent with the lag
 """
 from __future__ import annotations
@@ -14,6 +17,7 @@ from .lagcorr import adjacent_support
 R_PEAK = 0.6
 R_ADJ = 0.4
 TEMPORAL_TOL_S = 10.0  # one-2 samples of slack on onset ordering
+COUPLING_KINDS = ("ebpf", "pvc")  # genuine resource overlap/interdependence; "psi" only corroborates
 
 
 @dataclass
@@ -34,6 +38,15 @@ class Witness:
             out.append("pvc")
         return out
 
+    def couples(self, src: str, dst: str) -> bool:
+        """True only if the pair shares a real resource (disk/PVC or a network dep).
+
+        This is the "resources overlap/interdepend" test: edges may exist ONLY
+        between such pairs. PSI co-pressure does not count -- two pods both
+        stalling at once is coincidence, not interdependence.
+        """
+        return any(k in COUPLING_KINDS for k in self.kinds(src, dst))
+
 
 def accept_edge(
     src: str,
@@ -45,12 +58,15 @@ def accept_edge(
     onset_s: dict[str, float],
 ) -> dict | None:
     """Apply the three-clause gate. Returns edge dict with evidence list, or None."""
-    # clause 1 - statistical
-    if abs(r) < R_PEAK or not adjacent_support(profile, lag_s, R_ADJ):
+    # clause 1 - statistical. POSITIVE coupling only: a causal cascade/contention edge
+    # means the two stalls rise TOGETHER; an anti-correlation (one stalls as the other
+    # eases) is competition/coincidence, not A-causes-B, so it is not an edge.
+    if r < R_PEAK or not adjacent_support(profile, lag_s, R_ADJ):
         return None
-    # clause 2 - physical witness
+    # clause 2 - physical COUPLING: the pair must share a real resource (pvc/ebpf).
+    # PSI co-pressure alone is rejected -- it only corroborates a coupled edge.
     kinds = witness.kinds(src, dst)
-    if not kinds:
+    if not any(k in COUPLING_KINDS for k in kinds):
         return None
     # clause 3 - temporal precedence (only checkable when both onsets exist)
     t_src, t_dst = onset_s.get(src), onset_s.get(dst)

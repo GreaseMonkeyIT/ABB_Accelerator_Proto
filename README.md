@@ -61,7 +61,7 @@ The system must collect, analyze, and correlate real-time resource consumption o
 
 **Status**
 
-Active build through the correlation layer (P4). The factory (L0), core telemetry (L1), aggregator (L2), and correlation engine (L3) are operational on the cluster: on scenario S1 the engine attributes shared-disk I/O contention to its source (cooling-monitor) with a threshold-free causal edge to the victim (timescaledb), ranked by explanatory reach and confirmed by temporal precedence. Next is the language and dashboard layer (L4). See the status table below and the [build log](BUILD_LOG.md).
+Active build through the correlation layer (P4), now with a stateful, self-calibrating engine. The factory (L0), core telemetry (L1), aggregator (L2), and correlation engine (L3) are operational on the cluster. Detection is deviation-based against a learned per-pod baseline, so steady state is silent (S0) and only real excursions register; on scenario S1 the engine attributes shared-disk I/O contention to its source (cooling-monitor) via a per-pod write signal, with a threshold-free causal edge to the victim (timescaledb), ranked by explanatory reach and confirmed by temporal precedence, and persisted as a reusable case family. The language and dashboard layer (L4) is now built — a local **gemma4** narrator (`/api/narrative`, with a deterministic template fallback) and a Next.js launcher dashboard with a **3D causal graph** and an embedded Grafana PSI panel, reachable over Tailscale (P5/P6 done). See the status table below, the [build log](BUILD_LOG.md), and open items in [REMAINING.md](REMAINING.md).
 
 ---
 
@@ -92,7 +92,7 @@ flowchart LR
 
 **L2, aggregator (Go).** Queries Prometheus on a fixed interval, normalizes the results into a schema-stable JSON event format, applies deterministic threshold rules (an alert hint only), and serves a 15-minute per-pod history at `/window`.
 
-**L3, correlation engine (Python).** Detection scans the full ring and correlation is centred on the detected disturbance; an edge is admitted by statistical strength + a physical witness (eBPF link, PSI co-pressure, or shared volume) + temporal ordering — no resource thresholds. Then root-cause ranking by explanatory reach and blast-radius forecasting. No language model is used in this stage.
+**L3, correlation engine (Python).** Detection is **deviation-based**: each pod's PSI is judged against its own learned steady-state baseline, so normal factory load stays silent (S0) and only genuine excursions become findings. The disturbance is located across the full ring, then correlation is centred on it. Edges are admitted by statistical strength (**positive** coupling) + a physical witness (shared volume / eBPF link; PSI only corroborates) + temporal order — no resource thresholds. The **source** of a disk storm is identified from a per-pod **write** signal (`io_write`): the dominant writer that actually deviated, oriented writer→staller (PSI alone sees only victims). Root cause is ranked by explanatory reach, with blast-radius forecasting. Permanent SQLite memory on `engine-memory-pvc` holds **workload-keyed** edge confidence with a learned structural baseline, similarity-merged **case families**, model versions, and mistake records — all surviving the 14-day telemetry window. No language model is used in this stage. (Stateful-engine R&D: `BUILD_LOG` LOG-059→063; open items in `REMAINING.md`.)
 
 **L4, API + language + dashboard.** A FastAPI gateway (`api/`) exposes the verdict as frontend-agnostic JSON; a local model (Ollama) renders it into prose with a deterministic fallback; the dashboard presents the causal graph, a PSI heatmap, and a scenario console.
 
@@ -103,7 +103,7 @@ flowchart LR
 | `workloads/` | 15 L0 pod sources and Dockerfiles |
 | `deploy/` | Helm umbrella chart (`charts/factory`), `skctl` bootstrap, Prometheus/Loki values, `slowdisk.yaml`, L2/L3/L4 manifests |
 | `aggregator/` | L2 Go service, frozen `event.schema.json`, PromQL pack |
-| `correlation/` | L3 engine (`detectors`, `lagcorr`, `gate`, `ranking`, `pipeline`), `service.py`, unit tests |
+| `correlation/` | L3 engine (`detectors`, `lagcorr`, `gate`, `ranking`, `pipeline`, persistent `state`), `service.py`, unit tests |
 | `api/` | L4 frontend-agnostic API gateway (FastAPI) |
 | `scenarios/` | S0–S5 triggers, runbooks, rehearsal ledger |
 | `appendix/` | Operational scripts (`verify_taps`, `diag_scrape`, `component_check`, `restart_test`, `psi_watch`) |
@@ -281,9 +281,10 @@ bash appendix/diag_scrape.sh    # per-job scrape health
 | P1 factory (15 pods) | Complete (8-hour soak, no unplanned restarts) |
 | P2 telemetry (Prometheus, Loki, eBPF collectors) | Core taps live (15 of 15 PASS); Loki + eBPF collectors deferred |
 | P3 aggregator (L2) | Deployed to namespace `aiops`; emits schema-conformant events on S1 |
-| P4 correlation engine (L3) | Complete — on S1 the engine ranks the source (cooling-monitor) #1 with a threshold-free causal edge to the victim (timescaledb); 13 of 13 kernel fixtures |
-| P6 dashboard (L4) | API gateway deployed to `aiops` (frontend-agnostic `/api/*` with OpenAPI); narrator + frontend planned |
-| P5 language, P7 scenarios, P8 hardening | Planned |
+| P4 correlation engine (L3) | Complete + stateful R&D (LOG-059→063): workload-keyed persistent memory, `io_write` source attribution (writer→staller), learned structural baseline, deviation-gated detection (**S0 silent**), case-family similarity merge. On S1 root = cooling-monitor; 30 unit tests (13 kernel fixtures intact). One known residual + the P5–P8 roadmap in `REMAINING.md` |
+| P5 language (Ollama narrator) | Done — `/api/narrative` renders the verdict via local **gemma4** with a deterministic template fallback (LOG-064/066) |
+| P6 dashboard (L4) | Done — Next.js launcher: **3D causal graph**, gemma4 verdict, blast radius, scenario console, embedded Grafana PSI panel; per-component NodePorts over Tailscale (LOG-064→066) |
+| P7 scenarios (S2–S5), P8 hardening | Planned; Loki logs panel pending the alloy→promtail fix |
 
 ## Documentation
 

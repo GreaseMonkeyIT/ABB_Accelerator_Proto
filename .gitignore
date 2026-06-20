@@ -39,3 +39,8 @@ Thumbs.db
 ppt_pages_images/
 old.version/
 *.log
+skn_context.txt
+
+# ── dashboard build output (Next.js); deps/output are rebuilt, never committed ──
+dashboard/.next/
+dashboard/out/

@@ -107,6 +107,19 @@ def test_gate_rejects_wrong_temporal_order():
     assert e is None
 
 
+def test_gate_rejects_anticorrelation():
+    # a strong NEGATIVE correlation is competition/coincidence, not a causal cascade,
+    # so it is rejected even with a witness and correct ordering.
+    a = noise(0.2)
+    a[60:90] += 5.0
+    b = -np.roll(a, 3) + noise(0.2)            # anti-correlated follower
+    d = best_directed(a, b)
+    assert d["r"] < 0                          # the strongest coupling is negative
+    w = Witness(ebpf_edges={("a", "b")})
+    e = accept_edge("a", "b", d["r"], d["lag_s"], d["profile"], w, {"a": 300.0, "b": 315.0})
+    assert e is None
+
+
 # ---------- end-to-end: the S1-shaped chain ----------
 
 def chain_vectors():
@@ -155,6 +168,103 @@ def test_innocent_bystander_never_in_edges():
     out = run_pass(chain_vectors(), s1_witness(), slo_breach=["ccr"])
     for e in out["edges"]:
         assert "edge-ui" not in (e["src"], e["dst"])
+
+
+# ---------- source attribution: the aggressor writes, the victims stall ----------
+
+def writer_victim_vectors():
+    """src hogs the disk (spiky io_write, flat psi); v1/v2 stall (spiky psi, flat write)."""
+    spike = np.zeros(N)
+    spike[70:110] += 6.0
+    psi = {
+        "src": noise(0.1),                       # the source barely stalls -> invisible in psi
+        "v1": np.roll(spike, 1) + noise(0.2),    # victims stall, lagging the write storm (5s)
+        "v2": np.roll(spike, 3) + noise(0.2),    # (15s)
+    }
+    write = {
+        "src": spike + noise(0.2),               # the source writes hard (the hog)
+        "v1": noise(0.1),
+        "v2": noise(0.1),
+    }
+    return psi, write
+
+
+def writer_witness():
+    return Witness(shared_relation={
+        frozenset(("src", "v1")), frozenset(("src", "v2")), frozenset(("v1", "v2")),
+    })
+
+
+def test_source_attribution_blames_writer_not_staller():
+    psi, write = writer_victim_vectors()
+    w = writer_witness()
+    # psi alone is blind to the source (flat psi) -> a victim gets blamed
+    base = run_pass(psi, w, slo_breach=["v1", "v2"])
+    assert base["root_cause_ranking"], "expected a victim<->victim edge"
+    assert base["root_cause_ranking"][0]["pod"] != "src"
+    # with the write signal, the writer is correctly the root
+    out = run_pass(psi, w, slo_breach=["v1", "v2"], write_vectors=write)
+    assert out["root_cause_ranking"][0]["pod"] == "src"
+    src_edges = {(e["src"], e["dst"]) for e in out["edges"]}
+    assert ("src", "v1") in src_edges and ("src", "v2") in src_edges
+    assert any("write" in e["evidence"] for e in out["edges"])
+
+
+def test_baseline_gate_suppresses_within_normal_and_flags_deviation():
+    # 'a' only bumps within its normal band; 'b' makes a clear excursion above it.
+    a = noise(0.2); a[60:90] += 1.0      # peak ~1.2
+    b = noise(0.2); b[60:90] += 8.0      # peak ~8
+    vecs = {"a": a, "b": b}
+    w = Witness(shared_relation={frozenset(("a", "b"))})
+    # both detected when ungated:
+    f0 = {f["pod"] for f in run_pass(vecs, w)["findings"]}
+    assert "a" in f0 and "b" in f0
+    # with per-pod incident thresholds (3.0), only the real excursion is an incident:
+    out = run_pass(vecs, w, baselines={"a": 3.0, "b": 3.0})
+    finds = {f["pod"] for f in out["findings"]}
+    assert "b" in finds and "a" not in finds
+    # an immature baseline (None value) is treated as 'still learning' -> not an incident:
+    assert run_pass(vecs, w, baselines={"a": None, "b": None})["findings"] == []
+
+
+def test_source_attribution_picks_the_dominant_writer():
+    # A and B both stall AND both write the same shape -> both directions would correlate;
+    # only A out-writes B (100x), so only A may be the source (kills minor-writer false roots).
+    shape = np.zeros(N)
+    shape[70:110] += 1.0
+    psi = {"A": np.roll(shape, 1) + noise(0.2), "B": np.roll(shape, 1) + noise(0.2)}
+    write = {"A": shape * 100 + noise(0.2), "B": shape * 1.0 + noise(0.05)}
+    w = Witness(shared_relation={frozenset(("A", "B"))})
+    out = run_pass(psi, w, slo_breach=["A", "B"], write_vectors=write)
+    pairs = {(e["src"], e["dst"]) for e in out["edges"]}
+    assert ("A", "B") in pairs            # the dominant writer is the source
+    assert ("B", "A") not in pairs         # the minor writer is NOT attributed as a source
+    assert out["root_cause_ranking"][0]["pod"] == "A"
+
+
+def test_steady_writer_without_a_storm_is_not_a_source():
+    # B's write correlates with A's stall but has NO onset (low-amplitude, steady-ish) ->
+    # B is doing its routine job, not storming, so it must NOT be blamed (rule b).
+    shape = np.zeros(N)
+    shape[70:110] += 1.0
+    psi = {"A": shape * 5 + noise(0.3), "B": noise(0.3)}      # A stalls hard, B does not
+    write = {"A": noise(0.1), "B": shape * 0.6 + noise(0.3)}  # B's write tracks A but never storms
+    assert not [o for o in detectors.cusum_onsets(write["B"]) if abs(o["zpeak"]) >= 3.0]
+    w = Witness(shared_relation={frozenset(("A", "B"))})
+    out = run_pass(psi, w, slo_breach=["A"], write_vectors=write)
+    assert ("B", "A") not in {(e["src"], e["dst"]) for e in out["edges"]}
+
+
+def test_anticorrelated_writer_is_not_a_source():
+    # B storms (clear write onset) but its write is ANTI-correlated with A's stall
+    # (write up -> stall down). That is not contention, so no source edge (rule c).
+    shape = np.zeros(N)
+    shape[70:110] += 1.0
+    psi = {"A": 3.0 - np.roll(shape, 1) * 1.0 + noise(0.2), "B": noise(0.2)}  # A's stall DROPS
+    write = {"A": noise(0.1), "B": shape * 50 + noise(0.2)}                   # B writes hard
+    w = Witness(shared_relation={frozenset(("A", "B"))})
+    out = run_pass(psi, w, slo_breach=["A"], write_vectors=write)
+    assert ("B", "A") not in {(e["src"], e["dst"]) for e in out["edges"]}
 
 
 if __name__ == "__main__":

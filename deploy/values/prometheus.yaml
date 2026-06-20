@@ -1,7 +1,27 @@
 # kube-prometheus-stack values - 12h retention, 5s scrape on L0 namespaces (D-001, MASTER_PLAN 1.2)
-grafana: { enabled: false }  # OFF: Grafana 12 apiserver crashloops (exit 1, LOG-024). Re-enable w/ probe+mem fix for the Caretta screenshot (P2 step 3).
+grafana:
+  enabled: true                  # re-enabled (reverses LOG-024); pinned to v11 to avoid the v12 apiserver crashloop
+  image:
+    tag: "11.3.0"
+  service:
+    type: NodePort
+    nodePort: 30030              # direct at <node-ip>:30030 — each component is tested individually before any embed
+  sidecar:
+    datasources:
+      label: grafana_datasource_skn   # load ONLY this stack's datasources; ignores loki-stack's default-Loki configmap (the two-defaults crashloop). Provision Loki here as non-default when we wire the logs panel.
+  grafana.ini:
+    security:
+      allow_embedding: true      # let the dashboard page iframe Grafana panels (d-solo)
+    users:
+      default_timezone: Asia/Kolkata
+    auth.anonymous:
+      enabled: true
+      org_role: Viewer           # no login for the demo; the Prometheus datasource is auto-provisioned by the stack
 alertmanager: { enabled: true }
 prometheus:
+  service:
+    type: NodePort
+    nodePort: 30090             # direct PromQL + scrape targets at <node-ip>:30090
   prometheusSpec:
     retention: 12h
     scrapeInterval: 15s

@@ -48,8 +48,12 @@ up() {
     kubectl apply -f "$HERE/api.yaml"
     echo "L2 aggregator + L3 correlation engine + L4 API deployed to aiops (P3/P4/P6)"
   fi
-  has language  && echo "TODO P5: ollama deploy (or OLLAMA_HOST external)"
-  has dashboard && echo "TODO P6: dashboard deploy"
+  has language  && echo "P5 narrator: served by the api gateway (/api/narrative); set OLLAMA_HOST to the host Ollama, else it serves the template fallback"
+  if has dashboard; then
+    kubectl get ns aiops >/dev/null 2>&1 || kubectl create ns aiops
+    kubectl apply -f "$HERE/dashboard.yaml"
+    echo "L4 dashboard deployed to aiops (P6) - NodePort 30080 (reach via the node IP, incl. Tailscale)"
+  fi
   has chaos     && echo "TODO P7: helm install chaos-mesh (containerd socket: /run/k3s/containerd/containerd.sock)"
   echo "skctl up done (mode=$MODE components=$COMPONENTS)"
 }

@@ -128,12 +128,18 @@ only clean typed events.
   anomalies), `/healthz`. PSI is summed **per pod** (`sum by (namespace, pod)`), the fix that
   made events actually fire. *Note for L3:* the ring is a positional append and samples can drift
   in time across pods — which is why L3 re-aligns them by timestamp (see `service.py`).
-- **`queries.yaml`** — the PromQL "pack": one query per signal (cpu, psi_cpu/mem/io, mem, net,
-  pvc, restarts, latency_p95…) plus the `thresholds` block. ConfigMap-mounted, so editing
-  queries/thresholds needs only a configmap reload + restart, no image rebuild. **These
-  thresholds are an L2 alerting hint only — the L3 causal graph does not depend on them.**
+- **`queries.yaml`** — the PromQL "pack": one query per signal (cpu, psi_cpu/mem/io, **io_write**
+  = per-pod disk-write throughput, the source-attribution signal, mem, net, pvc, restarts,
+  latency_p95…) plus the `thresholds` block. ConfigMap-mounted, so editing queries/thresholds needs
+  only a configmap reload + restart, no image rebuild. **These thresholds are an L2 alerting hint
+  only — the L3 causal graph does not depend on them.**
 - **`event.schema.json`** — the FROZEN v1 event contract (`v/kind/ns/pod/signal∈enum/value/
   zscore/threshold/window_s`). Freezing it lets L2 and L3 evolve independently.
+
+**L2 durability note.** Current code keeps `/window` as a live 15-minute ring. The planned 14-day
+L2 store should persist the same samples/events by absolute `ts` and let L3 bootstrap from
+`ORDER BY ts` when memory is empty or stale. That rolling telemetry DB is not the engine's
+long-term memory.
 
 ### L3 — correlation engine (`correlation/`, Python, deployed to ns `aiops`)
 
@@ -145,6 +151,15 @@ The deterministic detective. **No LLM anywhere in this layer.** Five ideas, five
   drops stale/dead pods automatically. It builds the physical-witness sets (which pods share a
   disk, which are co-stalled), runs `run_pass`, and serves the result at `/graph`. Key env:
   `ENGINE_SIGNAL` (psi_io), `ANALYSIS_WINDOW` (correlation span), `POLL_S` (grid step).
+- **`engine/state.py`** — persistent evolutionary memory + self-calibration, keyed by **workload**
+  (not the ephemeral pod-hash, so confidence survives restarts). It stores: edge confidence with a
+  learned **structural floor** (a witnessed coupling settles to a faint baseline instead of
+  vanishing, and brightens under load); similarity-merged **case families** (a variation is
+  recognised as a *variant of a type*, not a new type); per-workload **PSI baselines** (median+MAD,
+  storm-skipped) that define "normal" so an onset only counts as an incident when it **deviates**
+  from it — this is why S0 is silent; plus graph snapshots, model versions, and mistake records.
+  Mounted on `engine-memory-pvc`, no 14-day TTL. The pure `run_pass` output is the live evidence;
+  `state.py` decides how knowledge persists, fades, **gates incidents**, and is promoted into cases.
 - **`engine/detectors.py` (A1)** — changepoints. An **EWMA** tracks "normal"; a **CUSUM**
   accumulates drift and fires only when it's *sustained*, giving an onset accurate to a sample.
   `classify` then names the shape — burst (rises, returns), leak (keeps climbing), saturation
@@ -155,26 +170,31 @@ The deterministic detective. **No LLM anywhere in this layer.** Five ideas, five
   is the lag, and its sign is the direction. "cooling-monitor at T matches timescaledb at T+30s"
   → cooling-monitor leads.
 - **`engine/gate.py` (the false-positive killer)** — an edge enters the graph only if **all
-  three** hold: (1) statistical — |r| ≥ 0.6 at the peak *and* support at an adjacent lag (kills
-  flukes); (2) a **physical witness** — an eBPF link, PSI co-pressure on the same node, or a
-  shared PVC; (3) temporal — the source's onset precedes the victim's, consistent with the lag.
-  Correlation alone never makes an edge.
+  three** hold: (1) statistical — **positive** |r| ≥ 0.6 at the peak *and* adjacent-lag support
+  (anti-correlation is competition, not a cascade); (2) **physical coupling** — a shared PVC or an
+  eBPF link (PSI co-pressure only *corroborates*; it never makes an edge); (3) temporal — the
+  source's onset precedes the victim's, consistent with the lag. Correlation alone never makes an
+  edge. (Cross-signal **source** edges — write→staller — apply the same gate; see `pipeline.py`.)
 - **`engine/ranking.py` (A5)** — root cause by **explanatory reach**: walk accepted edges
   forward from each candidate with decaying weight, sum how much of the symptom set it explains,
   penalize anyone who is themselves explained from upstream. Top score = root cause; the same
   forward walk yields the **blast radius** with ETAs. (Deterministic and narratable — not
   PageRank, which let the victim outrank its cause.)
-- **`engine/pipeline.py` (`run_pass`, the orchestrator)** — ties it together, and carries the two
+- **`engine/pipeline.py` (`run_pass`, the orchestrator)** — ties it together, and carries the
   ideas that made it work on real data:
-  - **Event-centred analysis** — detect across the **full** 15-min ring (find the disturbance
-    *wherever* it sits, with a clean pre-event baseline), then correlate a slice **centred on the
-    detected event**. The data persists in the ring; the calculation *searches* it for the event
-    rather than staring at the last few minutes — so a storm minutes old is still analysed, and
-    the storm dominates the correlation instead of being diluted.
-  - **Threshold-free admission** — a pair is evaluated if it touches an anomalous pod *or* (once
-    something is disturbed) if the topology says the two are physically coupled. That pulls a
-    chronically-loaded victim into the graph by **correlation over a shared disk**, never by an
-    absolute resource limit. `tests/test_engine.py` pins all of this with 13 fixtures.
+  - **Deviation-gated detection** — an onset is an incident only if the pod's sustained (p90) PSI
+    exceeds its learned baseline (passed in from `state.py`); normal factory load stays silent (S0).
+  - **Event-centred analysis** — detect across the **full** ring (find the disturbance wherever it
+    sits, with a clean pre-event baseline), then correlate a slice **centred on the detected event**,
+    so a storm minutes old is still analysed and dominates the correlation instead of being diluted.
+  - **Source attribution (writer→staller)** — PSI sees only victims, so the *source* of a disk storm
+    is found from the per-pod **write** signal: the **dominant** writer that actually **deviated**,
+    positively correlated to (and leading) the victim's stall over the shared disk, oriented
+    writer→staller — no lag coin-flip, no DB's baseline writes mistaken for a source.
+  - **Threshold-free admission** — a coupled pair is evaluated once something is disturbed, pulling a
+    victim in by correlation over the shared disk, never by an absolute resource limit. `run_pass`
+    stays a pure function; `tests/test_engine.py` pins it (13 kernel fixtures + source/baseline/
+    anti-correlation cases).
 
 ### L4 — narration + dashboard (planned, P5/P6)
 
@@ -198,6 +218,8 @@ The **API service** (`api/`, below) is the frontend-agnostic seam that feeds any
   PVCs to a dedicated spinning disk (`/dev/sdb`), so S1's contention happens on a slow disk where
   the source actually stalls — while the K3s control plane stays fast on the NVMe.
 - **`aggregator.yaml` / `engine.yaml`** — the L2 and L3 Deployments+Services in ns `aiops`.
+  `engine.yaml` also creates `engine-memory-pvc`, a small keep-annotated local-path PVC for L3's
+  permanent memory; it is intentionally separate from the HDD-backed L0 storm volumes.
 - **`appendix/*.sh`** — read-only diagnostics: `verify_taps` (the telemetry tap gate),
   `component_check` (P0–P2 sweep), `diag_scrape`, `restart_test`, `psi_watch`.
 
@@ -210,8 +232,8 @@ S0 (idle — the engine must stay silent), **S1** (PVC I/O contention — the pr
 
 ## 5. Knobs you can turn without an image rebuild
 
-- **Engine:** `ANALYSIS_WINDOW` (correlation span), `ENGINE_SIGNAL`, `POLL_S` — env on
-  `deploy/correlation-engine`.
+- **Engine:** `ANALYSIS_WINDOW` (correlation span), `ENGINE_SIGNAL`, `POLL_S`, `MEMORY_DB`,
+  `EDGE_ALPHA`, `EDGE_DECAY`, `EDGE_SHOW`, `EDGE_HIDE` — env on `deploy/correlation-engine`.
 - **S1 intensity:** `FIO_JOBS/RUNTIME/FSYNC/SIZE/DIRECT` — cooling-monitor env in `values.yaml`.
 - **DB write load:** `PLC_PERIOD_MS`, `PLC_CHANNELS` — plc-gateway env in `values.yaml`.
 - **L2 thresholds/queries:** `aggregator/queries.yaml` (ConfigMap; reload + restart).
