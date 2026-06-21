@@ -17,7 +17,12 @@ from .lagcorr import adjacent_support
 R_PEAK = 0.6
 R_ADJ = 0.4
 TEMPORAL_TOL_S = 10.0  # one-2 samples of slack on onset ordering
-COUPLING_KINDS = ("ebpf", "pvc")  # genuine resource overlap/interdependence; "psi" only corroborates
+COUPLING_KINDS = ("ebpf", "pvc")  # admits a BARE correlation edge (accept_edge); "psi"/"node" only corroborate here
+# A SOURCE-attributed edge (writer/hog -> staller) may ALSO rest on same-node coupling: CPU/memory
+# contention has no network edge, so same-node PSI is its only physical witness (MASTER_PLAN
+# 1.4.4-2b). Kept OUT of COUPLING_KINDS so a same-node pair NEVER forms a bare psi cascade edge
+# (the LOG-061 false-positive fix); the source guard (usage leads stall + out-hogs) admits it safely.
+SOURCE_COUPLING_KINDS = ("ebpf", "pvc", "node")
 
 
 @dataclass
@@ -25,8 +30,9 @@ class Witness:
     """Physical relationships known to the topology agent (A3)."""
 
     ebpf_edges: set[tuple[str, str]] = field(default_factory=set)  # directed (src, dst)
-    psi_copressure: set[frozenset] = field(default_factory=set)    # {frozenset({a,b})} same node+resource
-    shared_relation: set[frozenset] = field(default_factory=set)   # shared PVC / same node
+    psi_copressure: set[frozenset] = field(default_factory=set)    # {frozenset({a,b})} co-stalling now (corroboration)
+    shared_relation: set[frozenset] = field(default_factory=set)   # shared PVC (disk coupling)
+    same_node: set[frozenset] = field(default_factory=set)         # {frozenset({a,b})} co-located = one CPU/mem contention domain (SOURCE-edge witness only)
 
     def kinds(self, src: str, dst: str) -> list[str]:
         out = []
@@ -36,6 +42,8 @@ class Witness:
             out.append("psi")
         if frozenset((src, dst)) in self.shared_relation:
             out.append("pvc")
+        if frozenset((src, dst)) in self.same_node:
+            out.append("node")
         return out
 
     def couples(self, src: str, dst: str) -> bool:
@@ -46,6 +54,13 @@ class Witness:
         stalling at once is coincidence, not interdependence.
         """
         return any(k in COUPLING_KINDS for k in self.kinds(src, dst))
+
+    def couples_source(self, src: str, dst: str) -> bool:
+        """Coupling admissible for a SOURCE-attributed edge: disk/net OR same-node. CPU/memory
+        contention has no network edge, so same-node PSI is its only physical witness. Broader than
+        couples() on purpose -- the source guard (usage leads stall + out-hogs the victim) is what
+        keeps a same-node pair from forming a victim<->victim false edge."""
+        return any(k in SOURCE_COUPLING_KINDS for k in self.kinds(src, dst))
 
 
 def accept_edge(

@@ -20,6 +20,8 @@ const fmt = (x) => (typeof x === "number" ? x.toFixed(2) : x);
 
 export default function Page() {
   const [graph, setGraph] = useState(null);
+  const [topo, setTopo] = useState(null);
+  const [recs, setRecs] = useState(null);
   const [narr, setNarr] = useState(null);
   const [health, setHealth] = useState(null);
   const [updated, setUpdated] = useState(null);
@@ -30,12 +32,13 @@ export default function Page() {
     setHost(window.location.hostname);
   }, []);
 
-  async function fireS1() {
-    setFired("firing…");
+  async function scenario(sid, action) {
+    setFired(`${action === "reset" ? "resetting" : "firing"} ${sid}…`);
     try {
-      const r = await fetch("/api/scenarios/S1/trigger", { method: "POST" });
+      const r = await fetch(`/api/scenarios/${sid}/${action}`, { method: "POST" });
       const j = await r.json().catch(() => ({}));
-      setFired(r.ok ? `armed ${new Date().toLocaleTimeString()} — changes show in ~50s` : `error ${r.status}: ${j.detail || ""}`);
+      const ok = action === "reset" ? `${sid} reset — clears in ~2–3 min` : `${sid} fired — changes show in ~50s`;
+      setFired(r.ok ? `${ok} (${new Date().toLocaleTimeString()})` : `error ${r.status}: ${j.detail || ""}`);
     } catch (e) {
       setFired("error: " + e);
     }
@@ -43,14 +46,16 @@ export default function Page() {
 
   async function refresh() {
     try {
-      const [g, n, h] = await Promise.all([
+      const [g, n, h, t] = await Promise.all([
         getJSON("/api/graph"),
         getJSON("/api/narrative"),
         getJSON("/api/health"),
+        getJSON("/api/topology").catch(() => null),  // eBPF map; graceful if Caretta down
       ]);
       setGraph(g);
       setNarr(n);
       setHealth(h);
+      if (t) setTopo(t);
       setUpdated(new Date());
     } catch (e) {
       /* keep last good values */
@@ -63,10 +68,20 @@ export default function Page() {
     return () => clearInterval(t);
   }, []);
 
+  // Recommendations are heavy PromQL (subqueries) and change slowly -> poll every 30s, not 5s.
+  useEffect(() => {
+    const load = () => getJSON("/api/recommendations").then(setRecs).catch(() => {});
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, []);
+
   const link = (port, path = "") => (host ? `http://${host}:${port}${path}` : "#");
   const meta = graph?.meta || {};
   const root = graph?.root?.[0];
   const blast = graph?.blast_radius || [];
+  const incipient = graph?.incipient || [];
+  const findings = graph?.findings || [];
 
   const components = [
     { name: "Causal API", port: PORTS.api, path: "/docs", status: health ? (health.ok ? "up" : "degraded") : null,
@@ -127,7 +142,7 @@ export default function Page() {
         <Stat label="Causal edges" value={meta.accepted_edges ?? graph?.edges?.length ?? "—"} />
         <Stat label="Root cause" value={root ? root.pod : "none"} color={root ? "var(--red)" : "var(--green)"} small />
 
-        <Panel span={12} title="Verdict" sub={narr ? (narr.source === "llm" ? "gemma4" : "template fallback") : ""}>
+        <Panel span={12} title="Verdict" sub={narr ? (narr.source === "llm" ? "gemma4" : narr.source === "steady" ? "steady" : narr.source === "forecast" ? "forecast" : "template fallback") : ""}>
           <div style={{ fontSize: 18, lineHeight: 1.5 }}>{narr?.text || "…"}</div>
           {root && (
             <div style={{ marginTop: 8, color: "var(--text-weak)" }}>
@@ -138,17 +153,69 @@ export default function Page() {
           )}
         </Panel>
 
-        <Panel span={12} title="Causal graph" sub="edge width ∝ confidence · hot = live incident · grey = steady backbone" bodyStyle={{ height: 460, padding: 0, flex: "none" }}>
-          <Graph graph={graph} />
+        <Panel span={12} title="AI insight feed" sub="forecasts + detected onsets">
+          {incipient.length === 0 && findings.length === 0 ? (
+            <div style={{ color: "var(--text-faint)" }}>no active findings — steady state</div>
+          ) : (
+            <>
+              {incipient.map((f, i) => (
+                <div key={`i${i}`} className="row">
+                  <span>
+                    <span style={{ color: "var(--red)", fontWeight: 600, textTransform: "uppercase", fontSize: 11, marginRight: 8 }}>forecast</span>
+                    <b>{f.pod}</b> · OOM in ~{Math.round(f.eta_s)}s
+                  </span>
+                  <span style={{ color: "var(--text-weak)" }}>
+                    {f.signal} · {Math.round((1 - (f.headroom_frac ?? 0)) * 100)}% of limit
+                  </span>
+                </div>
+              ))}
+              {findings.map((f, i) => (
+                <div key={`f${i}`} className="row">
+                  <span>
+                    <span style={{ color: "var(--orange)", fontWeight: 600, textTransform: "uppercase", fontSize: 11, marginRight: 8 }}>{f.class || "onset"}</span>
+                    <b>{f.pod}</b>
+                  </span>
+                  <span style={{ color: "var(--text-weak)" }}>
+                    onset ~{Math.round(f.onset_s)}s{typeof f.severity === "number" ? ` · severity ${f.severity.toFixed(2)}` : ""}
+                  </span>
+                </div>
+              ))}
+            </>
+          )}
+        </Panel>
+
+        <Panel span={12} title="Causal graph" sub={`causal edges (hot) over the eBPF-discovered topology (grey)${topo?.edges?.length ? ` · ${topo.edges.length} flows` : ""}`} bodyStyle={{ height: 520, padding: 0, flex: "none" }}>
+          <Graph graph={graph} topo={topo} />
         </Panel>
 
         <Panel span={12} title="PSI / I/O pressure" sub="Grafana · Prometheus" bodyStyle={{ padding: 0, flex: "none" }}>
           {host && (
             <iframe
               title="PSI panel"
-              src={`http://${host}:${PORTS.grafana}/d-solo/${PSI.uid}/${PSI.slug}?orgId=1&panelId=${PSI.panelId}&theme=dark&from=now-30m&to=now&refresh=5s&timezone=Asia/Kolkata`}
+              src={`http://${host}:${PORTS.grafana}/d-solo/${PSI.uid}/${PSI.slug}?orgId=1&panelId=${PSI.panelId}&theme=dark&from=now-15m&to=now&refresh=5s&timezone=Asia/Kolkata`}
               style={{ width: "100%", height: 460, border: 0, display: "block" }}
             />
+          )}
+        </Panel>
+
+        <Panel span={12} title="Recommendations · right-sizing" sub="p95 usage vs requests/limits (PS-Q4) · KAI verbs">
+          {recs?.fairness?.length ? (
+            <div style={{ marginBottom: 10, color: "var(--text-weak)", fontSize: 12 }}>
+              fairness (Gini over PSI stall): {recs.fairness.map((f) => `${f.namespace} ${f.gini}`).join("  ·  ")}
+            </div>
+          ) : null}
+          {recs?.right_sizing?.length ? (
+            recs.right_sizing.map((c, i) => (
+              <div key={i} className="row">
+                <span>
+                  <span style={{ color: c.verb === "reclaim" ? "var(--green)" : "var(--orange)", fontWeight: 600, textTransform: "uppercase", fontSize: 11, marginRight: 8 }}>{c.verb}</span>
+                  <b>{c.workload}</b> · {c.resource}
+                </span>
+                <span style={{ color: "var(--text-weak)" }}>{c.detail}</span>
+              </div>
+            ))
+          ) : (
+            <div style={{ color: "var(--text-faint)" }}>{recs?.source === "unavailable" ? "Prometheus unavailable" : "all workloads right-sized"}</div>
           )}
         </Panel>
 
@@ -166,9 +233,17 @@ export default function Page() {
         </Panel>
 
         <Panel span={6} title="Scenarios">
-          <button className="btn btn-primary" onClick={fireS1}>▶ Fire S1</button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn btn-primary" onClick={() => scenario("S1", "trigger")}>▶ S1 · I/O cascade</button>
+            <button className="btn btn-primary" onClick={() => scenario("S2", "trigger")}>▶ S2 · file starvation</button>
+            <button className="btn btn-primary" onClick={() => scenario("S5", "trigger")}>▶ S5 · mem leak</button>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+            <button className="btn" onClick={() => scenario("S2", "reset")}>■ reset S2</button>
+            <button className="btn" onClick={() => scenario("S5", "reset")}>■ reset S5</button>
+          </div>
           {fired && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-weak)" }}>{fired}</div>}
-          <div style={{ marginTop: 10, color: "var(--text-faint)", fontSize: 11 }}>S2–S5 fire via scenarios/&lt;id&gt;/trigger.sh</div>
+          <div style={{ marginTop: 10, color: "var(--text-faint)", fontSize: 11 }}>S3/S4 out of scope (CPU physics / network chaos)</div>
         </Panel>
       </div>
     </>

@@ -9,7 +9,7 @@ import itertools
 import numpy as np
 
 from . import detectors
-from .gate import R_ADJ, TEMPORAL_TOL_S, Witness, accept_edge
+from .gate import R_ADJ, SOURCE_COUPLING_KINDS, TEMPORAL_TOL_S, Witness, accept_edge
 from .lagcorr import adjacent_support, best_directed, lag_profile
 from .ranking import blast_radius, build_graph, rank_root_causes
 
@@ -27,7 +27,7 @@ def _writer_edge(src, dst, wsrc, vdst, witness, w_onset, v_onset):
     psi[dst] over a shared-disk/eBPF witness. Direction is FIXED src->dst (the writer is
     physically the source), so it never coin-flips like a near-simultaneous psi pair.
     An idle writer has a flat write vector -> zero correlation -> no edge (threshold-free)."""
-    kinds = [k for k in witness.kinds(src, dst) if k in ("ebpf", "pvc")]
+    kinds = [k for k in witness.kinds(src, dst) if k in SOURCE_COUPLING_KINDS]
     if not kinds:
         return None
     prof = lag_profile(wsrc, vdst)            # write[src] leads psi[dst] (configured lags >= 0)
@@ -52,6 +52,7 @@ def run_pass(
     window: int | None = None,
     write_vectors: dict[str, np.ndarray] | None = None,
     baselines: dict[str, float | None] | None = None,
+    recent: int | None = None,
 ) -> dict:
     """One correlation pass.
 
@@ -77,8 +78,13 @@ def run_pass(
             continue
         if baselines is not None:
             thr = baselines.get(pod)
-            # sustained elevation (p90), not a single noisy sample, must clear the band
-            if thr is None or float(np.percentile(vec, 90)) <= thr:
+            # sustained elevation (p90), not a single noisy sample, must clear the band. When
+            # `recent` is set, judge deviation over the RECENT tail only -> a storm that has
+            # cooled is no longer a live incident (the verdict resets ~recent samples after it
+            # ends, instead of when it scrolls out of the full ring), while detection still
+            # scanned the whole ring for the onset. recent=None (fixtures) judges all of vec.
+            gate_vec = vec[-recent:] if recent else vec
+            if thr is None or float(np.percentile(gate_vec, 90)) <= thr:
                 continue  # still learning, or within the pod's normal band -> steady state
         raw_onsets[pod] = ons
 
@@ -172,10 +178,13 @@ def run_pass(
                           # routine pod that *starts* storming gets an onset, so it still counts.
             wv = write_cvec[w]
             for v in sorted(cvec):
-                if v == w or not witness.couples(w, v):
+                if v == w or not witness.couples_source(w, v):
                     continue
-                if v not in active and not disturbed:
-                    continue
+                if v not in active:
+                    continue  # a SOURCE edge must point at a REAL victim (a deviating finding),
+                              # never just a co-located pod. The old `disturbed` escape connected
+                              # random pods once anything was active -- harmless under pvc (4 pods)
+                              # but a false-edge storm under same-node, where everything couples.
                 if write_act.get(w, 0.0) <= write_act.get(v, 0.0):
                     continue  # (a) and the source must out-write the victim (the dominant hog)
                 e = _writer_edge(w, v, wv, cvec[v], witness, write_onset_s.get(w), onset_s.get(v))

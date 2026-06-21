@@ -267,6 +267,71 @@ def test_anticorrelated_writer_is_not_a_source():
     assert ("B", "A") not in {(e["src"], e["dst"]) for e in out["edges"]}
 
 
+def test_recent_window_clears_a_stale_storm():
+    # Appended LAST on purpose: noise() draws from a shared module RNG, so a test inserted
+    # earlier would shift the RNG sequence of the tests after it.
+    # 'a' storms in the RECENT tail; 'b' stormed in the OLD part of the ring and has since cooled.
+    a = noise(0.2); a[N - 24:] += 8.0      # current storm (last 24 samples)
+    b = noise(0.2); b[40:78] += 8.0        # old storm (38 samples), recent tail back to normal
+    vecs = {"a": a, "b": b}
+    w = Witness(shared_relation={frozenset(("a", "b"))})
+    thr = {"a": 3.0, "b": 3.0}
+    # full ring (recent=None): the old storm still has enough mass to register as a finding
+    assert "b" in {f["pod"] for f in run_pass(vecs, w, baselines=thr)["findings"]}
+    # recent gate: only the pod still deviating in the recent tail is a live incident ->
+    # a finished storm clears the verdict ~recent samples after it ends (fast reset)
+    rec = {f["pod"] for f in run_pass(vecs, w, baselines=thr, recent=24)["findings"]}
+    assert "a" in rec and "b" not in rec
+
+
+def test_same_node_cpu_source_edge_has_no_network_path():
+    # ROAD Stage 2 / D-015: a CPU hog leads two co-residents' stall on the SAME NODE (no disk, no
+    # network). The source edge forms over same-node coupling; evidence carries `node`, never pvc/ebpf.
+    shape = np.zeros(N); shape[70:110] += 1.0
+    psi = {"v1": np.roll(shape, 1) + noise(0.2),     # victims stall on cpu
+           "v2": np.roll(shape, 1) + noise(0.2),
+           "src": noise(0.05)}                       # the hog barely stalls itself
+    usage = {"src": shape * 100 + noise(0.2),        # but it out-uses both 100x and leads
+             "v1": shape * 1.0 + noise(0.05),
+             "v2": shape * 1.0 + noise(0.05)}
+    w = Witness(same_node={frozenset(("src", "v1")), frozenset(("src", "v2")), frozenset(("v1", "v2"))})
+    out = run_pass(psi, w, slo_breach=["v1", "v2"], write_vectors=usage)
+    assert out["root_cause_ranking"][0]["pod"] == "src"
+    pairs = {(e["src"], e["dst"]) for e in out["edges"]}
+    assert ("src", "v1") in pairs and ("src", "v2") in pairs
+    assert all("node" in e["evidence"] and "pvc" not in e["evidence"] and "ebpf" not in e["evidence"]
+               for e in out["edges"])
+
+
+def test_same_node_bare_psi_pair_forms_no_edge():
+    # Same-node co-stall WITHOUT a deviating source (no write_vectors) must NOT form an edge --
+    # same-node is excluded from gate.couples(), so a victim<->victim cascade never appears.
+    shape = np.zeros(N); shape[70:110] += 1.0
+    psi = {"a": np.roll(shape, 1) + noise(0.2), "b": shape + noise(0.2)}
+    w = Witness(same_node={frozenset(("a", "b"))})
+    out = run_pass(psi, w, slo_breach=["a", "b"])
+    assert out["edges"] == []
+
+
+def test_source_edge_requires_a_real_victim_not_a_bystander():
+    # The cpu false-edge storm: same-node couples everything, so a hog whose usage happens to
+    # correlate with a NON-deviating pod must NOT connect to it. Only a pod that deviates from its
+    # OWN baseline is a victim. ('bystander' carries the same shape -> would correlate -> but its
+    # band is high enough that the shape is within normal, so it is not an incident.)
+    shape = np.zeros(N); shape[70:110] += 1.0
+    psi = {"hog": noise(0.05),                         # the hog barely stalls itself
+           "realvictim": np.roll(shape, 1) + noise(0.2),
+           "bystander": np.roll(shape, 1) + noise(0.2)}  # correlates, but not a deviation (see thr)
+    usage = {"hog": shape * 100 + noise(0.2), "realvictim": noise(0.05), "bystander": noise(0.05)}
+    w = Witness(same_node={frozenset(("hog", "realvictim")), frozenset(("hog", "bystander")),
+                           frozenset(("realvictim", "bystander"))})
+    thr = {"hog": 3.0, "realvictim": 0.5, "bystander": 50.0}   # bystander's band swallows the shape
+    out = run_pass(psi, w, slo_breach=None, write_vectors=usage, baselines=thr)
+    dsts = {e["dst"] for e in out["edges"]}
+    assert "realvictim" in dsts        # real victim is connected to the hog
+    assert "bystander" not in dsts     # bystander not connected despite same-node + correlation
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))

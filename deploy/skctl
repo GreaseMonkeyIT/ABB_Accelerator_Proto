@@ -32,9 +32,9 @@ up() {
     helm upgrade --install loki grafana/loki-stack -n observability -f "$HERE/values/loki.yaml"
     helm upgrade --install alloy grafana/alloy -n observability -f "$HERE/values/alloy.yaml" || echo "  (alloy install issue - logs deferred)"   # logs -> Loki (P2 step 2)
     # eBPF collectors are deferred/flaky (kernel-7.0, chart coords) - NON-FATAL so they can never block engine/dashboard deploys (LOG-039)
-    helm repo add caretta https://groundcover-com.github.io/caretta >/dev/null 2>&1 || true
-    helm repo update caretta >/dev/null 2>&1 || true
-    helm upgrade --install caretta caretta/caretta -n caretta --create-namespace -f "$HERE/values/caretta.yaml" || echo "  (caretta install skipped - repo/chart unresolved, deferred eBPF item)"   # P2 step 3
+    helm repo add groundcover https://helm.groundcover.com/ >/dev/null 2>&1 || true
+    helm repo update groundcover >/dev/null 2>&1 || true
+    helm upgrade --install caretta groundcover/caretta -n caretta --create-namespace -f "$HERE/values/caretta.yaml" || echo "  (caretta install skipped - CO-RE/kernel-7.0 or chart issue, deferred eBPF item)"   # P2 step 3 (repo groundcover @ helm.groundcover.com, chart groundcover/caretta - confirmed README)
     helm upgrade --install beyla grafana/beyla -n observability -f "$HERE/values/beyla.yaml" || echo "  (beyla install skipped - chart unresolved, deferred eBPF item)"   # P2 step 4
     echo "P2 eBPF: watch Caretta/OBI load CO-RE on kernel 7.0 (Otterize fallback if not), then: bash appendix/verify_taps.sh --strict"
   fi

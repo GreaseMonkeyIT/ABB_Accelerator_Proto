@@ -4,7 +4,8 @@ This is the "how it works" reference: the idea, the end-to-end flow, and every s
 editable file — what it is, what it does, and how it functions. Register: keep the technical
 terms (pod, PVC, PSI, CUSUM, Pearson, eBPF) but explain in narrative. The *decision history*
 (why each choice was made, in order) lives in `BUILD_LOG.md`; the *phase plan* in
-`BUILD_GUIDE.md`; the *architecture spec* in `MASTER_PLAN.md`. This file is the map of the code.
+`BUILD_GUIDE.md`; the *architecture spec* in `MASTER_PLAN.md`; the *current status + forward plan* in
+`ROAD_TO_COMPLETION.md` (and the latest `BUILD_LOG` SESSION HANDOFF). This file is the map of the code.
 
 ---
 
@@ -113,9 +114,11 @@ No application is instrumented; everything is read from the kernel via the kubel
   fences each app's *own* `/metrics` out of the engine's view (keeps "zero instrumentation"
   honest); Grafana is disabled (a crashloop on this image) and Prometheus runs on emptyDir.
 - **`loki.yaml` + `alloy.yaml`** — log pipeline (Alloy ships pod logs to Loki). Deferred red.
-- **`caretta.yaml` + `beyla.yaml`** — eBPF add-ons: Caretta's who-talks-to-whom service map and
-  OBI/Beyla request latency (the `latency_p95` signal that lights up the control-relay hop).
-  These are the deferred eBPF items — the core L0→L3 causal path needs none of them.
+- **`caretta.yaml`** — Caretta's eBPF who-talks-to-whom L4 service map (`caretta_links_observed`,
+  scraped into Prometheus). LANDED: loads on kernel 7.0 at a 1Gi limit; feeds `/api/topology` + the
+  unified-graph backbone. **`beyla.yaml`** — OBI/Beyla HTTP RED; it only sees HTTP, but the factory
+  talks MQTT/SQL, so the CCR `latency_p95` hop was dropped (LOG-078). The core L0→L3 causal path
+  needs neither.
 
 ### L2 — aggregator (`aggregator/`, Go, deployed to ns `aiops`)
 
@@ -149,8 +152,13 @@ The deterministic detective. **No LLM anywhere in this layer.** Five ideas, five
   crucial pre-processing: it resamples every pod onto **one shared wall-clock grid by each
   sample's timestamp** (positional indices drift because PSI is gappy and pods restart), and
   drops stale/dead pods automatically. It builds the physical-witness sets (which pods share a
-  disk, which are co-stalled), runs `run_pass`, and serves the result at `/graph`. Key env:
-  `ENGINE_SIGNAL` (psi_io), `ANALYSIS_WINDOW` (correlation span), `POLL_S` (grid step).
+  disk, which are co-stalled), runs `run_pass` **once per signal** (`ENGINE_SIGNALS` = psi_io/cpu/mem)
+  and **merges** the per-signal graphs (`engine/merge.py`) into one served `/graph`, each edge tagged
+  with its `signal`. The witness is per-signal: psi_io → shared-disk (pvc); psi_cpu/psi_mem → same-node
+  (source-edge only). It also collects `working_set` + each pod's memory limit and runs the OOM
+  forecaster (`engine/forecast.py`), attaching any `incipient` warnings to the served graph. Key env:
+  `ENGINE_SIGNALS`, `ANALYSIS_WINDOW` (correlation span), `RESET_WINDOW` (a finding clears this long
+  after a storm ends → fast reset), `POLL_S` (grid step), `FORECAST_HORIZON_S` (OOM warn window).
 - **`engine/state.py`** — persistent evolutionary memory + self-calibration, keyed by **workload**
   (not the ephemeral pod-hash, so confidence survives restarts). It stores: edge confidence with a
   learned **structural floor** (a witnessed coupling settles to a faint baseline instead of
@@ -165,6 +173,12 @@ The deterministic detective. **No LLM anywhere in this layer.** Five ideas, five
   `classify` then names the shape — burst (rises, returns), leak (keeps climbing), saturation
   (pinned at a limit), flap (oscillation/restart loops), shift. Robust σ from a longer quiet
   prefix so jitter doesn't fake onsets.
+- **`engine/forecast.py` (A1 forecaster)** — OOM early-warning. A pure helper (`incipient_findings`,
+  sibling to `merge.py`) that linearly extrapolates each pod's `working_set` ramp to its memory
+  **limit** and emits an `incipient` finding ("OOM in ~Ns") when the climb will breach within a
+  horizon. A memory leak is *self-caused* (no cross-pod edge), so this rides as a separate forecast,
+  not a graph edge — the S5 "we told you before the kernel did" beat. A flat level or a plateau (a DB
+  cache fill) has ~zero recent-tail slope and stays silent.
 - **`engine/lagcorr.py` (A4)** — who leads whom. Pearson r (Spearman fallback for heavy tails)
   between two pods at shifted alignments (0/5/15/30/60/120 s); the shift with the strongest |r|
   is the lag, and its sign is the direction. "cooling-monitor at T matches timescaledb at T+30s"
@@ -174,7 +188,9 @@ The deterministic detective. **No LLM anywhere in this layer.** Five ideas, five
   (anti-correlation is competition, not a cascade); (2) **physical coupling** — a shared PVC or an
   eBPF link (PSI co-pressure only *corroborates*; it never makes an edge); (3) temporal — the
   source's onset precedes the victim's, consistent with the lag. Correlation alone never makes an
-  edge. (Cross-signal **source** edges — write→staller — apply the same gate; see `pipeline.py`.)
+  edge. (Cross-signal **source** edges — writer/hog→staller — apply the same gate; see `pipeline.py`.
+  D-015: same-node PSI coupling is admitted for the SOURCE-edge path ONLY — so CPU/mem contention
+  with no network edge (S3) can form an edge, while a bare psi pair still never does.)
 - **`engine/ranking.py` (A5)** — root cause by **explanatory reach**: walk accepted edges
   forward from each candidate with decaying weight, sum how much of the symptom set it explains,
   penalize anyone who is themselves explained from upstream. Top score = root cause; the same
@@ -183,7 +199,9 @@ The deterministic detective. **No LLM anywhere in this layer.** Five ideas, five
 - **`engine/pipeline.py` (`run_pass`, the orchestrator)** — ties it together, and carries the
   ideas that made it work on real data:
   - **Deviation-gated detection** — an onset is an incident only if the pod's sustained (p90) PSI
-    exceeds its learned baseline (passed in from `state.py`); normal factory load stays silent (S0).
+    exceeds its learned baseline (from `state.py`); normal factory load stays silent (S0). With
+    `RESET_WINDOW` the deviation is judged over the RECENT tail, so a finished storm clears the
+    verdict in ~2 min instead of when it scrolls out of the 15-min ring.
   - **Event-centred analysis** — detect across the **full** ring (find the disturbance wherever it
     sits, with a clean pre-event baseline), then correlate a slice **centred on the detected event**,
     so a storm minutes old is still analysed and dominates the correlation instead of being diluted.
@@ -196,11 +214,20 @@ The deterministic detective. **No LLM anywhere in this layer.** Five ideas, five
     stays a pure function; `tests/test_engine.py` pins it (13 kernel fixtures + source/baseline/
     anti-correlation cases).
 
-### L4 — narration + dashboard (planned, P5/P6)
+### L4 — narration + dashboard (`api/`, `dashboard/`) — built
 
-A small local model (Ollama) renders the engine's verdict into a sentence, with a deterministic
-template fallback; the dashboard shows the causal graph, a PSI heatmap, and scenario buttons.
-The **API service** (`api/`, below) is the frontend-agnostic seam that feeds any UI.
+- **`api/main.py`** — the frontend-agnostic FastAPI seam (also queries Prometheus via `PROM_URL`):
+  `GET /api/graph` (normalized causal verdict, pod→workload, + any `incipient` OOM forecasts),
+  `/api/narrative` (the ONE LLM — gemma4 via Ollama renders the verdict; **idle/no-root returns a
+  deterministic "steady" line — or a model-free "OOM in ~Ns" forecast line when a leak is climbing —
+  and skips the model**; an actual model failure falls back to a template), `/api/topology` (the Caretta-discovered
+  service map), `/api/recommendations` (right-sizing in KAI verbs + per-namespace fairness Gini —
+  PS-Q4), `/api/pods`, `/api/events`, `/api/scenarios` (+ POST S1 trigger).
+- **`dashboard/`** — Next.js static export served by nginx (reverse-proxies `/api/`). ONE **unified
+  causal graph** (`Graph.jsx`): the eBPF-discovered topology backbone (thin grey) with causal edges
+  overlaid (hot/thick on a live incident), re-laying-out only on a structural change. Plus the gemma4
+  verdict card, stat tiles, an embedded Grafana PSI panel, a Recommendations panel, blast radius, and
+  a scenario console. Reached over the tailnet at `:30080`.
 
 ### Deploy & ops (`deploy/`)
 
@@ -232,8 +259,12 @@ S0 (idle — the engine must stay silent), **S1** (PVC I/O contention — the pr
 
 ## 5. Knobs you can turn without an image rebuild
 
-- **Engine:** `ANALYSIS_WINDOW` (correlation span), `ENGINE_SIGNAL`, `POLL_S`, `MEMORY_DB`,
-  `EDGE_ALPHA`, `EDGE_DECAY`, `EDGE_SHOW`, `EDGE_HIDE` — env on `deploy/correlation-engine`.
+- **Engine:** `ENGINE_SIGNALS` (psi_io,psi_cpu,psi_mem), `ANALYSIS_WINDOW`, `RESET_WINDOW`,
+  `DEV_K` (deviation-gate sensitivity), `POLL_S`, `FORECAST_HORIZON_S` (OOM warn window), `MEMORY_DB`,
+  `EDGE_ALPHA/DECAY/SHOW/HIDE`, `EDGE_PRIOR/FLOOR_FRAC` (structural backbone), `CASE_TAU_MERGE/FAMILY`
+  — env on `deploy/correlation-engine`.
+- **API:** `OLLAMA_HOST`/`OLLAMA_MODEL` (narrator), `PROM_URL` (topology + recommendations),
+  `RECLAIM_FRAC`/`RESIZE_FRAC` (right-sizing) — env on `deploy/api`.
 - **S1 intensity:** `FIO_JOBS/RUNTIME/FSYNC/SIZE/DIRECT` — cooling-monitor env in `values.yaml`.
 - **DB write load:** `PLC_PERIOD_MS`, `PLC_CHANNELS` — plc-gateway env in `values.yaml`.
 - **L2 thresholds/queries:** `aggregator/queries.yaml` (ConfigMap; reload + restart).

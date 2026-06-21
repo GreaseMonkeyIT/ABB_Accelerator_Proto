@@ -22,7 +22,7 @@ function edgeColor(w) {
   return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
 }
 
-export default function Graph({ graph }) {
+export default function Graph({ graph, topo }) {
   const fgRef = useRef();
   const wrapRef = useRef();
   const nodeCache = useRef(new Map());
@@ -46,23 +46,37 @@ export default function Graph({ graph }) {
   // contention bucket). Steady state returns the same object (no per-poll re-heat); a storm makes
   // new node objects (seeded with the last position) so three.js rebuilds them with new colours.
   const data = useMemo(() => {
-    if (!graph) return dataRef.current;
-    const root = graph.root?.[0]?.pod;
-    const victims = new Set((graph.blast_radius || []).map((b) => b.pod));
+    const causalEdges = graph?.edges || [];
+    const netEdges = topo?.edges || [];          // eBPF-discovered topology backbone
+    const root = graph?.root?.[0]?.pod;
+    const victims = new Set((graph?.blast_radius || []).map((b) => b.pod));
     const roleOf = (id) => (id === root ? "root" : victims.has(id) ? "victim" : "normal");
+
     const ids = new Set();
-    (graph.edges || []).forEach((e) => { ids.add(e.src); ids.add(e.dst); });
-    (graph.findings || []).forEach((f) => ids.add(f.pod));
-    const rows = (graph.edges || []).map((e) => ({
-      src: e.src,
-      dst: e.dst,
+    causalEdges.forEach((e) => { ids.add(e.src); ids.add(e.dst); });
+    (graph?.findings || []).forEach((f) => ids.add(f.pod));
+    netEdges.forEach((e) => { ids.add(e.src); ids.add(e.dst); });
+
+    const pairKey = (a, b) => a + "" + b;
+    const causalSet = new Set(causalEdges.map((e) => pairKey(e.src, e.dst)));
+    const causalRows = causalEdges.map((e) => ({
+      src: e.src, dst: e.dst, kind: "causal",
       hot: e.state === "active" || e.state === "confirming",
       w: e.render_weight ?? e.confidence ?? Math.abs(e.r || 0),
       label: `${(e.evidence || []).join("+")}${e.r != null ? ` · r=${e.r}` : ""}`,
     }));
+    // discovered network backbone (thin grey), minus any pair already drawn as a causal edge
+    const netRows = netEdges
+      .filter((e) => !causalSet.has(pairKey(e.src, e.dst)) && !causalSet.has(pairKey(e.dst, e.src)))
+      .map((e) => ({ src: e.src, dst: e.dst, kind: "net", hot: false, w: 0, label: `:${e.port || "?"}` }));
+    const rows = [...causalRows, ...netRows];
+
+    // Re-layout only when something STRUCTURAL changes: roles, causal edge state/weight-bucket, or
+    // the network edge SET (NOT its byte counts) -> the topology no longer re-heats every 5s poll.
     const sig = JSON.stringify([
       [...ids].map((id) => [id, roleOf(id)]).sort(),
-      rows.map((l) => [l.src, l.dst, l.hot, Math.round((l.w || 0) * 8)]).sort(),
+      causalRows.map((l) => [l.src, l.dst, l.hot, Math.round((l.w || 0) * 8)]).sort(),
+      netRows.map((l) => [l.src, l.dst]).sort(),
     ]);
     if (sig === sigRef.current) return dataRef.current;
     sigRef.current = sig;
@@ -76,10 +90,10 @@ export default function Graph({ graph }) {
       return n;
     });
     for (const id of [...cache.keys()]) if (!ids.has(id)) cache.delete(id);
-    const links = rows.map((l) => ({ source: l.src, target: l.dst, hot: l.hot, w: l.w, label: l.label }));
+    const links = rows.map((l) => ({ source: l.src, target: l.dst, kind: l.kind, hot: l.hot, w: l.w, label: l.label }));
     dataRef.current = { nodes, links };
     return dataRef.current;
-  }, [graph]);
+  }, [graph, topo]);
 
   // Fit the camera once the layout settles (re-fit only when the node set changes), so it never
   // opens zoomed-out and doesn't yank a camera you've rotated. A timeout backs up onEngineStop.
@@ -121,10 +135,10 @@ export default function Graph({ graph }) {
           s.position.set(0, -(r + 3), 0);
           return s;
         }}
-        linkColor={(l) => edgeColor(l.w)}
-        linkWidth={(l) => 0.6 + l.w * 3}
+        linkColor={(l) => (l.kind === "net" ? "#4b5159" : edgeColor(l.w))}
+        linkWidth={(l) => (l.kind === "net" ? 0.4 : 0.8 + l.w * 3)}
         linkOpacity={0.6}
-        linkDirectionalArrowLength={3.5}
+        linkDirectionalArrowLength={3}
         linkDirectionalArrowRelPos={1}
         linkDirectionalParticles={(l) => (l.hot ? 4 : 0)}
         linkDirectionalParticleWidth={2}

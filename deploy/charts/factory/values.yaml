@@ -39,7 +39,7 @@ pods:
       mounts: [{pvc: shared-logs-pvc, path: /shared}], affinityGroup: storage-domain }
   - { name: log-archiver,           group: storage, ns: factory-data, image: log-archiver, kind: CronJob, schedule: "0 2 * * *", suspend: true,
       cpu: {req: 100m, lim: 500m},  mem: {req: 128Mi, lim: 256Mi},
-      env: {DATA_DIR: /shared},
+      env: {DATA_DIR: /shared, S2_SEED_MB: "2048"},  # S2 fio storm: TOTAL on-disk footprint (MB), split across S2_JOBS (must fit the 5Gi PVC). DURATION = S2_RUNTIME (default 120s); concurrency = S2_JOBS, fsync = S2_FSYNC -- all env-tunable, no rebuild (LOG-091). To lengthen the storm raise S2_RUNTIME, not S2_SEED_MB.
       mounts: [{pvc: shared-logs-pvc, path: /shared}], affinityGroup: storage-domain }
   - { name: analytics-batch,        group: compute, ns: factory-data, image: analytics-batch, kind: CronJob, schedule: "*/5 * * * *", suspend: true,
       cpu: {req: 250m, lim: 500m},  mem: {req: 256Mi, lim: 512Mi} }

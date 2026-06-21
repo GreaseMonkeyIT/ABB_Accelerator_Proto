@@ -15,7 +15,7 @@ def _graph():
                 "dst": "timescaledb-aaa111-bbb22",
                 "r": 0.8,
                 "lag_s": 30,
-                "evidence": ["stat", "pvc", "temporal"],
+                "evidence": ["write", "pvc", "temporal"],  # source-rooted S1 (LOG-060): writer->staller
             }
         ],
         "root_cause_ranking": [
@@ -270,3 +270,29 @@ def test_case_is_promoted_from_incident(tmp_path):
     assert case["signal"] == "psi_io"
     assert case["witness_kind"] == "pvc"
     assert case["occurrences"] == 1
+
+
+def test_case_not_promoted_from_victim_cascade(tmp_path):
+    """ROAD Stage 0 / REMAINING section 1: a psi-only victim->victim cascade whose ranked root
+    owns no source(write) edge must NOT be promoted -- it is the wrong-direction case that the
+    deviation gate cannot catch (both pods are real victims). Only source-rooted verdicts promote."""
+    mem = GraphMemory(str(tmp_path / "memory.db"))
+    cascade = {
+        "findings": [],
+        "root_cause_ranking": [{"pod": "dcim-bridge-x-1", "score": 1.0, "onset_s": 10.0}],
+        "blast_radius": [{"pod": "timescaledb-y-1", "impact": 0.5, "eta_s": 30}],
+        "edges": [{"src": "dcim-bridge-x-1", "dst": "timescaledb-y-1", "r": 0.7, "lag_s": 0,
+                   "evidence": ["stat", "pvc"]}],  # NO write evidence -> not a real aggressor
+        "meta": {},
+    }
+    out = mem.observe(cascade, _vecs("dcim-bridge-x-1", "timescaledb-y-1"), ts=1000.0)
+    assert "case_id" not in out["meta"]          # nothing promoted
+    assert mem.stats()["cases"] == 0
+
+    # but the SAME pair WITH a source edge (a real aggressor) does promote
+    sourced = dict(cascade)
+    sourced["edges"] = [{"src": "dcim-bridge-x-1", "dst": "timescaledb-y-1", "r": 0.7, "lag_s": 5,
+                         "evidence": ["write", "pvc", "temporal"]}]
+    out2 = mem.observe(sourced, _vecs("dcim-bridge-x-1", "timescaledb-y-1"), ts=1010.0)
+    assert out2["meta"].get("case_id")
+    assert mem.stats()["cases"] == 1
