@@ -1,9 +1,11 @@
 # S1 - PVC I/O cascade (the hero scenario)
 
 Trigger: `./trigger.sh` (touch FLUSH) OR `POST cooling-monitor:8080/flush` (the L4 button) -> sustained
-fio (4 jobs x 512m, time_based **60s**, **fsync=2**, O_DIRECT) on the shared PVC. Intensity is
-Helm-tunable (FIO_JOBS/SIZE/RUNTIME/FSYNC, no rebuild). fsync=2 means the writer stalls too (LOG-051);
-storm duration is no longer load-bearing now the engine event-centres on the detected onset (LOG-054).
+fio (6 jobs x 512m, time_based **120s**, **fsync=1**, O_DIRECT) on the shared PVC. Intensity is
+Helm-tunable (FIO_JOBS/SIZE/RUNTIME/FSYNC) and now also baked as the cooling-monitor image defaults
+(LOG-093). fsync=1 means writer+victim both stall (LOG-051); the 120s storm outlasts the read window so
+cooling-monitor stays the live write-source and roots correctly (LOG-093, supersedes the LOG-054
+"duration not load-bearing" note).
 
 | t | expected |
 |---|---|

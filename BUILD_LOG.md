@@ -923,3 +923,93 @@ only). py_compile clean (laptop).
 Links: LOG-091 (S2 fio fix — io_write makes io_read moot), LOG-075 (fixed Job name -> workload), ROAD Stage 3 (A5
 bounded K8s tools — this SA is the groundwork) + Stage 6 (scenario console), §1.6 (six panels); api/main.py,
 deploy/api.yaml, dashboard/app/page.jsx.
+
+## LOG-093 · 2026-06-22 · NOTE — box-verify of the full set (S0/S1/S5 good; S2 clean-root is physics+baseline gated -> mark-two); env tunes; ABB submission cut
+What: Box session after applying LOG-091/092. Results + one hard finding.
+ - **S1 — FIXED via env (no rebuild).** Root was flipping cooling-monitor -> **dcim-bridge** mid-run: the storm was
+   only 60s (FIO_RUNTIME=60) so it ended before the read window, and cooling-monitor (O_DIRECT) self-stalls weakly
+   (~0.018) while dcim-bridge's loud fdatasync baseline (~0.04, victim spike to ~0.068) out-ranked it once the source
+   stopped writing (the lingering edge was `[stat,pvc]`, NO `write`). Fix: `kubectl set env deploy/cooling-monitor
+   FIO_RUNTIME=120 FIO_FSYNC=1 FIO_JOBS=6` -> cooling-monitor stays the live write-source across the whole window ->
+   roots correctly, evidence `[stat,pvc,write,temporal]`, gemma4 prose correct. Onset ~90s was partly a TEST ARTIFACT:
+   triggering right after the env rollout meant ~60s of sample warm-up (build_inputs needs >=12 samples); on settled
+   pods S1 lights up ~45-50s. Optional faster onset: DEV_K 4->3.5.
+ - **S5 — tuned.** `FORECAST_MIN_FRAC 0.6->0.5` -> the OOM card fires earlier (eta ~9.5s at 85% of limit, was 0.6s at
+   99%). Still brief (a ~6MB/s leak crosses the gate fast, then OOM resets working_set) but a valid pre-kill warning.
+   Do NOT go below 0.5 (re-admits the cooling-monitor(0.43)/safety-interlock(0.24) false cards LOG-087 killed).
+ - **S2 — clean root NOT achieved; deferred to mark-two (physics + baseline, NOT a bug).** fio image confirmed live
+   (`which fio`; archive.sh has rw=write). log-archiver writes **73-119 MB/s** (io_write dominant, ~40x everyone) — the
+   source signal is unambiguous. BUT it never roots, because: (a) it **self-stalls ~0 (psi 0.007)** — O_DIRECT+libaio is
+   async bandwidth, the submitter never blocks; (b) its **psi baseline never matures** (on-demand CronJob ->
+   `baseline_threshold`=None -> run_pass skips it -> it can NEVER be a finding -> no `+1.0` self-explanation bonus in
+   ranking, the path S1 uses); (c) **no victim stalls enough**: timescaledb=0 (LOG-088 checkpoint relax made it do
+   almost no disk I/O -> not a stallable victim), dcim only 0.067 (marginal vs DEV_K=4). Best result: log-archiver
+   reached 0.325 (#2), out-ranked by cooling-monitor's held backbone (0.675). **Disk confirmed spinning HDD**
+   (`/sys/block/sdb/queue/rotational`=1) — so it is NOT disk speed; it is the S0-silence/S2-victim tension (the LOG-088
+   quieting that made S0 silent also removed timescaledb as a victim) + the CronJob baseline gap. Same family as the S3
+   physics block (LOG-076). **mark-two fix:** make log-archiver SELF-stall via synchronous fio (`--ioengine=psync
+   --iodepth=1`) so it's a finding directly, + a baseline-gate tweak so a no-baseline CronJob with a strong onset can
+   still be a finding; OR re-aggravate timescaledb I/O (more ingest / tighter checkpoint), which re-risks S0. For the
+   demo, S1 is the disk-causality flagship; S2's honest beat is the engine's restraint (dominant writer, no stalling
+   victim -> no false root = the threshold-free discipline).
+ - **Env-tune persistence WARNING:** the S1/S5 fixes above are LIVE `kubectl set env` only. `deploy/skctl up` / helm
+   upgrade RESET deploy env to chart values and WIPE them. To persist: bake `FIO_RUNTIME=120/FIO_FSYNC=1/FIO_JOBS=6`
+   into cooling-monitor's env in `values.yaml`, and `FORECAST_MIN_FRAC=0.5` into the engine env in `deploy/engine.yaml`.
+ - **hot-edge curl quirk (cosmetic):** `state!="steady"` is the wrong "hot" filter — a live incident edge often renders
+   via the held backbone (`render_weight`~1.0, state steady). The dashboard colors by `render_weight`, so the 3D graph
+   shows hot edges correctly; use `render_weight>0.4` for CLI checks. No code change.
+ - **ABB submission cut.** Pushed a curated copy to a NEW repo (`GreaseMonkeyIT/ABB_Accelerator_Submission`) via an
+   ORPHAN branch (fresh single-commit history -> the leaky 8-commit history + internal docs do not follow) + a
+   `.gitignore` that excludes `BUILD_LOG/BUILD_GUIDE/ROAD_TO_COMPLETION/P0_DESKTOP_SETUP/RULES/archive/agents/` + scratch.
+   This repo (codex, mark-one) keeps everything — it is the internal master.
+Why: complete the box record; pin S2 as a mark-two physics/baseline item (not a regression) so it is not re-chased;
+flag that the live env tunes must be baked or a redeploy loses them.
+Links: LOG-091 (S2 fio), LOG-092 (console), LOG-088 (timescaledb quieting — the S2-victim tension), LOG-087
+(FORECAST_MIN_FRAC + false cards), LOG-076 (S3 physics block — same family), LOG-074 (real-victim rule), D-014 (HDD);
+deploy/charts/factory/values.yaml (cooling-monitor env to bake), deploy/engine.yaml (FORECAST_MIN_FRAC to bake).
+
+## LOG-094 · 2026-06-22 · STEP (bake the LOG-093 S1/S5 tunes as code defaults) — survive skctl up/helm without env
+What: Baked the box-verified LOG-093 env tunes into the image defaults + the committed manifests so a redeploy can
+no longer wipe them (LOG-093 warned `skctl up`/helm RESET deploy env to chart values). Operator chose code defaults
+over values-only.
+ - **cooling-monitor (S1):** `workloads/cooling-monitor/main.py` defaults FIO_JOBS 4->6, FIO_RUNTIME 45->120, FIO_FSYNC
+   8->1; `deploy/charts/factory/values.yaml` cooling-monitor env mirrored to the same (6/120/1) so the chart no longer
+   overrides the baked defaults with the old 4/60/2. (120s outlasts the read window -> cooling-monitor stays the live
+   write-source -> roots correctly; FSYNC=1 = writer+victim both stall; JOBS=6 louder.)
+ - **engine forecast (S5):** `correlation/service.py` FORECAST_MIN_FRAC default 0.6->0.5; `deploy/engine.yaml` env
+   mirrored to 0.5 (earlier OOM card; do NOT go below 0.5 -> re-admits the LOG-087 false cards). forecast.py
+   `DEFAULT_MIN_FRAC` (the pure-function/library default the tests pin) left at 0.6 — untouched, run_pass + 47/47 intact.
+ - **DEV_K** already 3.5 in engine.yaml (the LOG-093 "optional faster onset" — no change needed).
+ - Refreshed `scenarios/S1/runbook.md` (4x60s/fsync=2 -> 6x120s/fsync=1; notes the bake; supersedes the LOG-054
+   "duration not load-bearing" note that LOG-093 disproved on settled pods).
+Impact / apply on box: baked-code change -> rebuild `skn/cooling-monitor:v0.1` + `skn/correlation-engine:v0.1` + `sudo
+k3s ctr images import -`; `deploy/skctl up` (applies the mirrored values.yaml) + `kubectl apply -f deploy/engine.yaml`
++ `kubectl rollout restart deploy/cooling-monitor -n factory-data deploy/correlation-engine -n aiops`. Then S1 should
+root cooling-monitor on a FRESH deploy with NO `kubectl set env`, and the S5 card fires at ~85% of the limit. `run_pass`
+untouched; py_compile clean expected.
+Why: the LOG-093 fixes were live `kubectl set env` only -> a single redeploy before the demo would silently break S1/S5.
+Links: LOG-093 (the tunes + the wipe warning), LOG-091 (S2 fio), LOG-051 (FSYNC writer+victim stall), LOG-054
+(duration-not-load-bearing — superseded for settled-pod timing), LOG-087 (MIN_FRAC false cards); workloads/cooling-monitor/main.py,
+correlation/service.py, deploy/charts/factory/values.yaml, deploy/engine.yaml, scenarios/S1/runbook.md.
+
+## LOG-095 · 2026-06-22 · STEP (submission docs polish: README honesty + demo runbook + fresh-clone build fix)
+What: Pre-submission pass on the public-facing docs (operator's 4-item list) so the repo a judge reads/clones is
+honest and runnable.
+ - **README honesty pass:** L1 telemetry no longer claims OBI (dropped, LOG-078) or a working Loki (partial) — now
+   PSI / kube-state / node-exporter / Caretta + "logs partial"; L4 "PSI heatmap" -> the actual panel set (the full
+   heatmap is mark-two); S1 expected evidence gains the `write` token (io_write source attribution, was undersold);
+   Scenarios section gains a "live today = S0/S1/S5; S2 = engine restraint; S3/S4 out of scope" note. Clone URL
+   Proto -> Submission (also done earlier this turn).
+ - **DEMO_RUNBOOK.md (new):** press-this/say-this for S0->S1->S5 + honest answers to the four judge Qs (Q3-disk +
+   Q4 live; Q1/Q2 engine-ready/future) + fallbacks. Linked from the README. Closes the LOG-089 demo-runbook gap.
+ - **Fresh-clone build fix (Makefile):** `make images`/`make import` now also build + import `skn/api` and
+   `skn/dashboard` (both have self-contained Dockerfiles) — previously `make import` + `skctl up` left api/dashboard
+   in ImagePullBackOff on a clean clone (skctl applies api.yaml + dashboard.yaml). README `make test (13/13)` ->
+   `(47/47)` (the target runs the whole suite).
+Impact / apply: docs + Makefile only — NO image rebuild, NO box change; affects the next clean `make import`. Lands
+in the same pre-submission commit as LOG-093/094 and feeds the Submission re-cut.
+Open (operator call): Ollama/gemma4 install is not in the README (the narrator has a deterministic fallback, so a
+clone still runs) — add a one-line optional setup note if you want the prose live out-of-the-box. Deck
+(SiliconKnights_Final.*) NOT reviewed (Submission folder, off-limits) — offer: read-only overclaim scan on request.
+Links: LOG-089 (demo-runbook gap), LOG-078 (OBI dropped), LOG-093 (S1/S5 verified — what the runbook demos), ROAD
+Stage 6 + docs workstream; README.md, DEMO_RUNBOOK.md, Makefile.

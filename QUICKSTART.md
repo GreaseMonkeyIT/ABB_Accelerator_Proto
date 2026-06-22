@@ -106,5 +106,4 @@ disturbance, so you can read `/graph` a minute or two after the storm and still 
 - Tuning knobs that need no rebuild: engine `ANALYSIS_WINDOW` (correlation span, env on
   `deploy/correlation-engine`); cooling-monitor `FIO_JOBS/RUNTIME/FSYNC` (Helm values).
 
-See `README.md` for architecture, `BUILD_GUIDE.md` for the phased build, and `BUILD_LOG.md`
-for the decision history.
+See `README.md` for architecture and `MASTER_PLAN.md` for the design decisions and methodology.

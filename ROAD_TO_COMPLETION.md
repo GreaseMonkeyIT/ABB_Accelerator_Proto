@@ -1,5 +1,15 @@
 # ROAD TO COMPLETION — SiliconKnights / ABB Accelerator
 
+> **Status 2026-06-22 (submission day — see BUILD_LOG LOG-093):** ABB submission cut to a clean repo
+> (`ABB_Accelerator_Submission`, orphan history, internal docs gitignored). **Live: S0 silent · S1
+> disk-causality cascade · S5 OOM forecast · eBPF topology · recommendations (Q4) · scenario console
+> (S1/S2/S5 fire + reset) · gemma4 narrator (`e4b-it-qat`).** S2 fires and log-archiver is the dominant
+> writer (~40×), but clean root-attribution is **mark-two**: it never self-stalls (async O_DIRECT) and its
+> CronJob psi baseline never matures, while LOG-088 quieted timescaledb out of being a victim — physics +
+> baseline gap, same family as S3 (LOG-093). Out of scope: S3 (CPU physics), S4 (network/Chaos Mesh),
+> DB-restart probe (Q2). **Live env tunes** (cooling-monitor `FIO_RUNTIME/FSYNC/JOBS`, engine
+> `FORECAST_MIN_FRAC=0.5`) must be **baked into `values.yaml`/`engine.yaml`** or `skctl up` wipes them.
+
 The forward plan: **what is missing, and what each stage must deliver to close it.** Grounded in a
 file-by-file audit of the code against MASTER_PLAN.md (the *what/why*) and BUILD_GUIDE.md (the
 *phase path*). This file **supersedes REMAINING.md** (archived to `archive/`).
