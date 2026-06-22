@@ -1013,3 +1013,122 @@ clone still runs) — add a one-line optional setup note if you want the prose l
 (SiliconKnights_Final.*) NOT reviewed (Submission folder, off-limits) — offer: read-only overclaim scan on request.
 Links: LOG-089 (demo-runbook gap), LOG-078 (OBI dropped), LOG-093 (S1/S5 verified — what the runbook demos), ROAD
 Stage 6 + docs workstream; README.md, DEMO_RUNBOOK.md, Makefile.
+
+## LOG-096 · 2026-06-22 · FIX (model-name consistency, found during the from-scratch box verify) — main.py default + skctl banner
+What: During the cold-start box run, the `skctl up` banner still said "set OLLAMA_HOST to the host Ollama" and the
+code default model was the OLD `gemma4:e4b` (11GB MXFP8), even though we swapped to `gemma4:e4b-it-qat` (6.1GB QAT,
+LOG-092). The RUNNING narrator was already correct — `deploy/api.yaml` sets `OLLAMA_MODEL=gemma4:e4b-it-qat` +
+`OLLAMA_HOST` baked — so this was a consistency/clarity gap, not a runtime bug.
+ - `api/main.py`: `OLLAMA_MODEL` default `gemma4:e4b` -> `gemma4:e4b-it-qat` (matches api.yaml; a standalone run now
+   picks the right model). Baked change -> rebuild api on the next pass; moot for the deployed pod (api.yaml overrides).
+ - `deploy/skctl`: the P5 banner now states the model + OLLAMA_HOST are baked in api.yaml (gemma4:e4b-it-qat @ host)
+   + the deterministic template fallback — no longer implies you must set OLLAMA_HOST. (Script, no rebuild.)
+Still inconsistent (flagged, operator call, NOT changed): BUILD_GUIDE.md P5 ("Ollama pod / 4B Q4 / keep_alive=30m" vs
+reality host Ollama / e4b-it-qat / keep_alive 10m — internal-only doc); MASTER_PLAN.md ("LangGraph agents on Ollama",
+"Ollama runs as a separate pod" vs reality deterministic agents + host Ollama — public + judge-visible, but it's the
+normative spec, per LOG-089 correct via report not in place); `deploy/api.yaml` OLLAMA_HOST is a hardcoded box LAN IP
+(192.168.1.239) -> a fresh clone falls back to template until edited (harmless by design).
+Impact: api/main.py baked (rebuild api next pass); skctl script (no rebuild). Rides the next Proto/Submission propagation.
+Links: LOG-092 (the e4b-it-qat swap + keep_alive), LOG-089 (don't edit the normative MASTER_PLAN in place); api/main.py,
+deploy/skctl, deploy/api.yaml.
+
+## LOG-097 · 2026-06-22 · FIX (run-guide gap found during the from-scratch box verify) — slowdisk static-PV setup not in the deploy flow
+What: Cold-start box run: after `skctl up`, `tsdb-pvc`/`shared-logs-pvc` (StorageClass `slowdisk`) sat **Pending** ->
+factory-data pods (timescaledb/cooling-monitor/dcim-bridge) stuck `Pending`. Cause: `deploy/slowdisk.yaml` defines
+static local PVs with **reclaimPolicy: Retain**; the cold-start teardown (`kubectl delete ns factory-data`) deleted the
+PVCs, leaving the PVs **Released** (Retain never auto-rebinds) -> the new PVCs have no Available PV. Compounding it,
+**`skctl up` does NOT apply `slowdisk.yaml`** (one-time manual step in the file header), and the README documented only
+the single-disk `local-path` swap, not the reference-box slowdisk setup -> a fresh clone on the HDD box deploys to
+Pending PVCs with no guidance.
+Box fix: `kubectl delete pv tsdb-pv-slowdisk shared-logs-pv-slowdisk` + (cold start) wipe `/mnt/slowdisk/{tsdb,shared-logs}/*`
++ re-apply `sed "s/<NODE_NAME>/$NODE/g" deploy/slowdisk.yaml | kubectl apply -f -` -> PVs Available -> WaitForFirstConsumer
+binds as the pods schedule.
+Guide fix: README "Storage" note now (a) tells the reference box to apply slowdisk.yaml BEFORE `skctl up`, and (b) warns
+the PVs are Retain -> after a teardown, delete the Released PVs and re-apply. Single-disk local-path path unchanged.
+Not auto-applied in skctl by design: the HDD prep (mkfs/mount) is destructive + box-specific (/dev/sdb), and single-disk
+users don't want slowdisk at all -> kept a documented prep step.
+Impact: docs only (no rebuild). Rides the next propagation.
+Links: D-014 (slow HDD), LOG-047 (slowdisk pinning); deploy/slowdisk.yaml, README.md.
+
+## LOG-098 · 2026-06-22 · STEP (run-guide: document cold-start baseline warm-up) — S0 silent ~15-20 min after a fresh deploy
+What: During the from-scratch box verify, S0 reached silent (`/api/graph findings: []`, only the dormant 0.2-weight
+structural PVC backbone, state steady) **~15-20 min** after the cold deploy (HDD init -> TimescaleDB populate -> engine
+learns per-pod PSI baselines on the empty engine-memory-pvc). The README Verify note ("~5 minutes") undersold this for a
+cold start. Detection is deviation-based, so the engine is only reliably silent once it has a baseline to deviate from;
+during warm-up `/graph` showed a transient timescaledb psi_io shift (initial-population I/O) that cleared on its own.
+Guide fix: README Verify note now says ~15-20 min for a cold deploy (baseline learning + populate + 15-min ring) vs ~5
+min for a warm redeploy; DEMO_RUNBOOK pre-flight step 3 sets the same expectation + "don't fire S1 until S0 is silent."
+Box state at this point: full stack Running, gate GREEN, bake env confirmed (FIO 6/120/1), **S0 silent -> ready for S1.**
+Impact: docs only (no rebuild). Rides the next propagation.
+Links: LOG-097 (slowdisk, prior step of this run), LOG-094 (the baked S1 defaults, now confirmed live on a cold deploy),
+README.md, DEMO_RUNBOOK.md.
+
+## LOG-099 · 2026-06-22 · NOTE — from-scratch box verify COMPLETE: S0/S1/S5 pass, S2 mis-roots (gap #2 confirmed), 6 guide fixes
+What: Cold, fresh-clone (public Submission repo) full bring-up on the box, following the README run guide. Result:
+ - **S0 ✓** silent (`findings: []`) ~15-20 min after the cold deploy (baselines learned).
+ - **S1 ✓** root=cooling-monitor; hero edge cooling-monitor->timescaledb active (render_weight 1.0, evidence
+   [write,pvc,temporal]); victim timescaledb — on the BAKED FIO 6/120/1, **NO `kubectl set env`**. Self-clears ~3-5 min
+   (the 120s storm lengthens the decay tail — documented). Validates LOG-093+094 on a clean clone.
+ - **S5 ✓** OOM forecast fired: vision-qc incipient `leak`, eta_s 2.9 at ~95% of limit (headroom 0.048) BEFORE the kill,
+   on the baked FORECAST_MIN_FRAC=0.5. Brief window (fast leak), caught on a poll.
+ - **S2 ✗ mis-roots — gap #2 confirmed live.** Fired log-archiver-s2; timescaledb stalled (psi_io `flap` sev 0.72) but
+   the verdict rooted **cooling-monitor score 1.0 with `onset_s: NULL`** — the held cooling-monitor->timescaledb backbone
+   edge (source memory, state steady, hits 109 from the prior S1) won root, while log-archiver was invisible (CronJob ->
+   no PSI baseline -> not a finding). So S2 gives a CONFIDENT WRONG root, not "no root." Disproved the prior
+   README/DEMO_RUNBOOK "S2 forms no false root" wording -> corrected both to "verdict not reliable; don't demo S2 live."
+Guide/doc fixes found+made this run (Codex; ride the next propagation): (1) Makefile builds+imports api+dashboard
+(fresh clone was ImagePullBackOff) LOG-095; (2) README Storage = slowdisk static-PV setup + Retain/redeploy gotcha
+LOG-097; (3) cold-start ~15-20min warm-up note LOG-098; (4) model-name consistency main.py/skctl LOG-096; (5) S1 reset
+time ~3-5min (was ~2-3) + S1 evidence [write,pvc,temporal] (dropped the conditional `stat`); (6) S2 framing corrected
+(this entry).
+Demonstrable set = **S0/S1/S5** (clean) + recommendations + topology. S2 = known gap; engine fix (a held edge must NOT
+win root without a LIVE deviating source — `onset_s: null` is the tell) is **mark-two** (extends LOG-074/075/090 gap #2).
+Box state: full stack Running from a cold fresh clone, gate GREEN.
+Links: LOG-093 (S2 root-cause analysis), LOG-090 gap #2 (structural backbone root-promotion), LOG-094 (baked defaults),
+LOG-074/075 (real-victim / held-garbage precedents); README.md, DEMO_RUNBOOK.md, scenarios/S1/runbook.md.
+
+## LOG-100 · 2026-06-22 · NOTE — public S2 framing softened (operator) — "attribution tuning in progress", not "wrong root"
+What: For the public submission, the README + DEMO_RUNBOOK S2 wording was changed from "confident wrong root / not
+trustworthy / don't demo" to **"root-attribution refinement in progress"** (engine reliably detects the disk stress;
+pinpointing an on-demand CronJob source is being tuned; lead with S1). Honest — it IS a tuning/attribution-refinement
+issue — and submission-appropriate. **The blunt internal truth stays in LOG-099 + the project memory** (S2 mis-roots
+cooling-monitor, `onset_s: null`, gap #2); those are gitignored from the public repo. Do NOT re-harden the public docs
+thinking they overclaim — the soft framing is intentional and accurate.
+Links: LOG-099 (the blunt verify result), README.md, DEMO_RUNBOOK.md.
+
+## LOG-101 · 2026-06-22 · STEP (final doc-consistency recomb before the submission commit)
+What: One pass over the human-read docs to remove stale/contradictory content surfaced by the from-scratch verify:
+ - **QUICKSTART.md** — repo URL Proto->Submission (×2); `make import` comment now lists api+dashboard; warm-up
+   ~5 min -> ~15-20 min cold (baseline learning); S1 expected evidence `["stat","psi","pvc"]` -> `["write","pvc","temporal"]`.
+ - **scenarios/S2/runbook.md** — removed the flat "Expected verdict: root = log-archiver / distinct from S1" claim
+   (it contradicted LOG-099); now a "root-attribution tuning in progress" Status note + retitled; the checklist's
+   "root = log-archiver" reframed as the tuning target.
+ - **EXPLANATIONS.md** — S1 evidence `[stat,pvc,temporal]` -> `[write,pvc,temporal]` (the write token = source attribution).
+ - **ROAD_TO_COMPLETION.md** — added a dated current-state banner (S0/S1/S5 demonstrable, S2 mark-two, S3/S4 OOS,
+   baked tunes, 6 guide fixes; points to LOG-099/100 as authoritative); S2 matrix row -> mark-two; S5 row -> box-verified.
+Now consistent across README / QUICKSTART / DEMO_RUNBOOK / EXPLANATIONS / scenarios / ROAD: S1 evidence = [write,pvc,
+temporal]; cold warm-up ~15-20 min; repo = Submission; S2 = attribution tuning (not "works", not "no root"); S5 verified.
+Impact: docs only (no rebuild). This + LOG-096..100 are the single pre-submission commit; then the session closes.
+Links: LOG-099 (verify), LOG-100 (S2 public framing); README.md, QUICKSTART.md, DEMO_RUNBOOK.md, EXPLANATIONS.md,
+scenarios/S2/runbook.md, ROAD_TO_COMPLETION.md.
+
+## LOG-102 · 2026-06-22 · NOTE — SESSION CLOSE: current build status (submission-ready) + MASTER_PLAN honesty pass
+**Build status (current):** mark-one is the frozen submission branch, pushed to Proto + the public orphan repo
+(github.com/GreaseMonkeyIT/ABB_Accelerator_Submission). From-scratch cold box verify PASSED on a fresh public-repo
+clone: **S0 silent / S1 roots cooling-monitor (write-evidenced, baked defaults, no env tune) / S5 OOM forecast fires**;
+recommendations + eBPF topology live. **S2 = root-attribution tuning (mark-two)** — detects the disk stress, doesn't
+yet pinpoint the on-demand CronJob source (the held backbone out-ranks it). S3/S4 out of scope (physics / Chaos Mesh).
+Judge answers demonstrable: **Q3-disk (S1) + Q4 (recommendations) live**; Q1/Q3-CPU engine-ready/physics-gated; Q2
+(restart probe) future.
+**This session did:** baked the S1/S5 tunes as code defaults (LOG-094); box-verified from scratch (LOG-099); fixed six
+run-guide gaps — api/dashboard `make import`, slowdisk PVs + Retain gotcha, cold ~15-20 min warm-up, model-name,
+S1 reset ~3-5 min, S2 framing (LOG-095→101); softened the public S2 wording to "tuning in progress" (LOG-100); recombed
+every human-read doc to one consistent story (LOG-101); **MASTER_PLAN honesty pass (this entry)** — as-built banner +
+corrected LangGraph (not used) / Ollama-on-host (not a pod) / gemma4:e4b-it-qat (not phi3.5-qwen) / which-agents-built,
+across the diagram, data-flow table, §1.4.6, and the model spec.
+**mark-two backlog (next BUILD work, NOT now):** S2 fix (held edge must not win root without a live deviating source —
+`onset_s: null` tell; + a no-baseline-CronJob source path); io_read; pod drawer; full PSI heatmap; fairness header
+widget; rehearsal ledger; A2 Log Detective (Loki); A5 bounded tool calls.
+**NEXT SESSION with this folder is DOCS-ONLY (operator intent):** author a full README + a "book" — a comprehensive
+internal reference the team can read/refer to anytime. NOT more build/box work. **Session closed here.**
+Links: LOG-094/099/100/101 (this run); EXPLANATIONS.md (as-built map); README.md, MASTER_PLAN.md.

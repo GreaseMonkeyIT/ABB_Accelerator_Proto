@@ -24,6 +24,14 @@ the breadth the deck promised that the single proven path does not yet cover.
 
 ## 0. Where we are — the honest baseline
 
+> **Current-state banner — 2026-06-22 (authoritative: BUILD_LOG LOG-093→100).** From-scratch cold box verify on a
+> fresh public-repo clone is **complete**: **S0/S1/S5 demonstrable** (S1 roots cooling-monitor on *baked* defaults,
+> no env tune; S5 forecasts OOM before the kill); **S2 = root-attribution tuning (mark-two)** — the engine detects
+> the disk stress but a held backbone edge out-ranks the no-baseline CronJob source; **S3/S4 out of scope** (physics /
+> Chaos Mesh). S1/S5 tunes are baked (LOG-094); six run-guide gaps were found+fixed this pass (api/dashboard build,
+> slowdisk PVs, cold ~15-20 min warm-up, model-name, S1 reset time, S2 framing). The stage matrix below is the
+> *original* plan — treat this banner + LOG-099/100 as the current state.
+
 **Built and solid:** the full L0→L4 spine; the S1 PVC-I/O cascade end-to-end, threshold-free,
 correct root; the stateful memory + case-library + deviation-baseline engine (this is *beyond* the
 original MASTER_PLAN — see DESIGN doc); source attribution via `io_write`; the gemma4 narrator with
@@ -59,9 +67,9 @@ dashboard, and 3 of the 4 "judge-bait" questions — needs new muscle.
 | Dashboard (launcher/verdict/unified causal+topo graph/PSI/recs) | §1.6 | ◐ ~5 of 6 | Stage 6 |
 | Dashboard — timeline replay, pod drawer, PSI heatmap, insight feed | §1.6 | ○ not built | Stage 6 |
 | Scenarios S0, S1 | §2.5 | ● built+verified | — |
-| Scenario S2 (large-file I/O) | §2.5 | ◐ self-contained bulk + distinct-root wired (LOG-086); box-verify pending | Stage 4 |
+| Scenario S2 (large-file I/O) | §2.5 | ◐ fires; root-attribution **tuning (mark-two)** — held backbone out-ranks the no-baseline CronJob source (LOG-099) | mark-two |
 | Scenario S3 (CPU, no-net) | §2.5 | ◐ engine done, **physics-blocked** | Stage 4 |
-| Scenario S5 (mem leak → OOM) | §2.5 | ◐ forecast wired (LOG-085); box-verify + runbook pending | Stage 4 |
+| Scenario S5 (mem leak → OOM) | §2.5 | ✅ box-verified cold (LOG-099) — OOM forecast fires before the kill | — |
 | Scenario S4 (network + retry) | §2.5 | ○ needs Chaos Mesh + net signal | Stage 4 |
 | Chaos Mesh conductor | §2.5 | ○ `TODO` in skctl | Stage 4 |
 | Rehearsal ledger / accuracy table | §5.4, D-004 | ○ empty header | Stage 4 |
