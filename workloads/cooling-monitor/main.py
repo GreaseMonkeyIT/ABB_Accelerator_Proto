@@ -16,9 +16,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 DIR         = os.environ.get("DATA_DIR", "/shared/cooling")
 FLUSH_FLAG  = os.path.join(DIR, "FLUSH")
 FIO_SIZE    = os.environ.get("FIO_SIZE", "512m")    # per-job file size (x JOBS must fit the PVC)
-FIO_JOBS    = os.environ.get("FIO_JOBS", "4")       # concurrent writers
-FIO_RUNTIME = os.environ.get("FIO_RUNTIME", "45")   # sustained seconds (time_based)
-FIO_FSYNC   = os.environ.get("FIO_FSYNC", "8")      # fsync every N writes (lower = more stall)
+FIO_JOBS    = os.environ.get("FIO_JOBS", "6")       # concurrent writers (S1-verified, LOG-093)
+FIO_RUNTIME = os.environ.get("FIO_RUNTIME", "120")  # sustained seconds (time_based); > the read window so the source stays live (LOG-093)
+FIO_FSYNC   = os.environ.get("FIO_FSYNC", "1")      # fsync every N writes (lower = more stall); 1 = writer+victim both stall
 FIO_DIRECT  = os.environ.get("FIO_DIRECT", "1")     # O_DIRECT: real device I/O, not page cache
 PORT        = int(os.environ.get("TRIGGER_PORT", "8080"))
 # Idle heartbeat (env-tunable). Defaults are deliberately tiny so steady state writes ~negligibly to

@@ -31,7 +31,7 @@ pods:
       cpu: {req: 150m, lim: 500m},  mem: {req: 128Mi, lim: 256Mi} }
   - { name: cooling-monitor,        group: storage, ns: factory-data, image: cooling-monitor, port: 8080,
       cpu: {req: 100m, lim: 300m},  mem: {req: 128Mi, lim: 256Mi},
-      env: {DATA_DIR: /shared/cooling, FIO_SIZE: 512m, FIO_JOBS: "4", FIO_RUNTIME: "60", FIO_FSYNC: "2", FIO_DIRECT: "1"},  # 60s storm; duration is no longer load-bearing now the engine event-centres (LOG-054). FSYNC=2 = the writer stalls too (LOG-051).
+      env: {DATA_DIR: /shared/cooling, FIO_SIZE: 512m, FIO_JOBS: "6", FIO_RUNTIME: "120", FIO_FSYNC: "1", FIO_DIRECT: "1"},  # S1-verified (LOG-093): 120s storm outlasts the read window so cooling-monitor stays the live write-source -> roots correctly; FSYNC=1 = writer+victim both stall; JOBS=6 louder. Mirrors the baked main.py defaults.
       mounts: [{pvc: shared-logs-pvc, path: /shared}], affinityGroup: storage-domain }
   - { name: dcim-bridge,            group: storage, ns: factory-data, image: dcim-bridge, port: 8080, httpProbe: true,
       cpu: {req: 50m,  lim: 150m},  mem: {req: 64Mi,  lim: 128Mi},

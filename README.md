@@ -61,7 +61,7 @@ The system must collect, analyze, and correlate real-time resource consumption o
 
 **Status**
 
-Active build through the correlation layer (P4), now with a stateful, self-calibrating engine. The factory (L0), core telemetry (L1), aggregator (L2), and correlation engine (L3) are operational on the cluster. Detection is deviation-based against a learned per-pod baseline, so steady state is silent (S0) and only real excursions register; on scenario S1 the engine attributes shared-disk I/O contention to its source (cooling-monitor) via a per-pod write signal, with a threshold-free causal edge to the victim (timescaledb), ranked by explanatory reach and confirmed by temporal precedence, and persisted as a reusable case family. The language and dashboard layer (L4) is now built — a local **gemma4** narrator (`/api/narrative`, with a deterministic template fallback) and a Next.js launcher dashboard with a **3D causal graph** and an embedded Grafana PSI panel, reachable over Tailscale (P5/P6 done). See the status table below, the [build log](BUILD_LOG.md), and open items in [REMAINING.md](REMAINING.md).
+All five layers (L0–L4) are built and running on the cluster. Detection is deviation-based against a learned per-pod baseline, so steady state is silent (S0) and only real excursions register; on scenario S1 the engine attributes shared-disk I/O contention to its source (cooling-monitor) via a per-pod write signal, with a threshold-free causal edge to the victim (timescaledb), ranked by explanatory reach and confirmed by temporal precedence, and persisted as a reusable case family. The engine is multi-signal (psi_io / psi_cpu / psi_mem) and carries an OOM forecaster (working_set → limit) and a deterministic right-sizing + fairness pass (PS-Q4). The L4 layer is a local **gemma4** narrator (`/api/narrative`, deterministic template fallback) and a Next.js dashboard with a **3D causal graph over the eBPF-discovered topology**, an AI insight feed, recommendations, an embedded Grafana PSI panel, and a scenario console (S1/S2/S5 fire + reset), reachable over Tailscale. Demonstrable today: S0 silent, S1 disk-causality cascade, S5 OOM forecast, topology, and recommendations. See the status table below.
 
 ---
 
@@ -88,13 +88,13 @@ flowchart LR
 
 **L0, factory (observed system).** A 15-pod synthetic factory (MQTT telemetry, TimescaleDB, and cooling, vision, and control services) that reproduces representative failure classes (CPU throttling, page-cache writeback, fsync storms, OOM termination) using real kernel mechanisms rather than injected metric values.
 
-**L1, telemetry.** Prometheus scrapes the factory namespaces every 5 seconds. Signals include kubelet cAdvisor metrics with Pressure Stall Information (PSI), container logs via Loki and Grafana Alloy, and eBPF-derived data (Caretta network flows, OBI request metrics). No application instrumentation is required.
+**L1, telemetry.** Prometheus scrapes the factory namespaces every 5 seconds. Signals include kubelet cAdvisor metrics with Pressure Stall Information (PSI), kube-state-metrics, node-exporter, and eBPF-discovered service flows (Caretta). Container logs (Loki / Grafana Alloy) are partial. No application instrumentation is required.
 
 **L2, aggregator (Go).** Queries Prometheus on a fixed interval, normalizes the results into a schema-stable JSON event format, applies deterministic threshold rules (an alert hint only), and serves a 15-minute per-pod history at `/window`.
 
-**L3, correlation engine (Python).** Detection is **deviation-based**: each pod's PSI is judged against its own learned steady-state baseline, so normal factory load stays silent (S0) and only genuine excursions become findings. The disturbance is located across the full ring, then correlation is centred on it. Edges are admitted by statistical strength (**positive** coupling) + a physical witness (shared volume / eBPF link; PSI only corroborates) + temporal order — no resource thresholds. The **source** of a disk storm is identified from a per-pod **write** signal (`io_write`): the dominant writer that actually deviated, oriented writer→staller (PSI alone sees only victims). Root cause is ranked by explanatory reach, with blast-radius forecasting. Permanent SQLite memory on `engine-memory-pvc` holds **workload-keyed** edge confidence with a learned structural baseline, similarity-merged **case families**, model versions, and mistake records — all surviving the 14-day telemetry window. No language model is used in this stage. (Stateful-engine R&D: `BUILD_LOG` LOG-059→063; open items in `REMAINING.md`.)
+**L3, correlation engine (Python).** Detection is **deviation-based**: each pod's PSI is judged against its own learned steady-state baseline, so normal factory load stays silent (S0) and only genuine excursions become findings. The disturbance is located across the full ring, then correlation is centred on it. Edges are admitted by statistical strength (**positive** coupling) + a physical witness (shared volume / eBPF link; PSI only corroborates) + temporal order — no resource thresholds. The **source** of a disk storm is identified from a per-pod **write** signal (`io_write`): the dominant writer that actually deviated, oriented writer→staller (PSI alone sees only victims). Root cause is ranked by explanatory reach, with blast-radius forecasting. Permanent SQLite memory on `engine-memory-pvc` holds **workload-keyed** edge confidence with a learned structural baseline, similarity-merged **case families**, model versions, and mistake records — all surviving the 14-day telemetry window. No language model is used in this stage. (Stateful-engine design: see `DESIGN_stateful_engine_and_case_library.md`.)
 
-**L4, API + language + dashboard.** A FastAPI gateway (`api/`) exposes the verdict as frontend-agnostic JSON; a local model (Ollama) renders it into prose with a deterministic fallback; the dashboard presents the causal graph, a PSI heatmap, and a scenario console.
+**L4, API + language + dashboard.** A FastAPI gateway (`api/`) exposes the verdict as frontend-agnostic JSON; a local model (Ollama) renders it into prose with a deterministic fallback; the dashboard presents the 3D causal graph over the discovered topology, recommendations, an AI insight feed, an embedded Grafana PSI panel, and a scenario console.
 
 ## Repository layout
 
@@ -107,7 +107,7 @@ flowchart LR
 | `api/` | L4 frontend-agnostic API gateway (FastAPI) |
 | `scenarios/` | S0–S5 triggers, runbooks, rehearsal ledger |
 | `appendix/` | Operational scripts (`verify_taps`, `diag_scrape`, `component_check`, `restart_test`, `psi_watch`) |
-| `MASTER_PLAN`, `BUILD_GUIDE`, `BUILD_LOG`, `EXPLANATIONS`, `QUICKSTART` | architecture, build path, decision journal, code map, clone-to-running guide |
+| `MASTER_PLAN`, `EXPLANATIONS`, `QUICKSTART`, `DESIGN_*` | architecture, code map, clone-to-running guide, stateful-engine design |
 
 ## Prerequisites
 
@@ -145,11 +145,11 @@ kubectl get --raw "/api/v1/nodes/$(kubectl get no -o name | cut -d/ -f2)/proxy/m
 Images are built per workload and imported into the K3s runtime (registry prefix/tag `skn/<name>:v0.1`, from chart values — no registry needed at runtime).
 
 ```bash
-git clone https://github.com/GreaseMonkeyIT/ABB_Accelerator_Proto.git && cd ABB_Accelerator_Proto
+git clone https://github.com/GreaseMonkeyIT/ABB_Accelerator_Submission.git && cd ABB_Accelerator_Submission
 chmod +x deploy/skctl appendix/*.sh scenarios/*/*.sh   # restore exec bits (harmless if already set)
 
-make test            # optional: engine pytest (13/13) + aggregator go test
-make images          # docker build all 15 workloads
+make test            # optional: engine pytest (47/47) + aggregator go test
+make images          # docker build 15 workloads + aggregator/engine/api/dashboard
 make import          # build + import all images into k3s containerd
 make charts          # helm lint + template the factory chart
 ./deploy/skctl up --mode solo
@@ -183,6 +183,8 @@ Each scenario under `scenarios/` is version-controlled with a runbook and a rese
 | S4 | Network degradation and retry amplification | Injected latency on an egress service |
 | S5 | Memory leak and OOM termination | Unbounded growth to the container memory limit |
 
+**Live and verified today: S0, S1, S5.** S2 fires, but clean root-attribution is a mark-two item — the dominant writer is unambiguous yet no co-resident stalls hard enough to form a victim edge, so the engine correctly forms *no* root (the threshold-free discipline working, not a bug). S3 (CPU) and S4 (network) are out of scope here (node-saturation physics / Chaos Mesh) — see [Status](#status). A press-this/say-this walkthrough is in [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md).
+
 **Fire S1 (the proven path) and read the causal graph:**
 
 ```bash
@@ -190,7 +192,7 @@ bash scenarios/S1/trigger.sh; sleep 50
 kubectl get --raw "/api/v1/namespaces/aiops/services/correlation-engine:9100/proxy/graph" | python3 -m json.tool
 ```
 
-Expected: `root_cause_ranking[0] = cooling-monitor`, an edge `cooling-monitor → timescaledb` with `evidence: ["stat","pvc","temporal"]`, and a blast radius — the source blamed, the victim predicted, no resource threshold in the path.
+Expected: `root_cause_ranking[0] = cooling-monitor`, an edge `cooling-monitor → timescaledb` with `evidence: ["stat","pvc","write","temporal"]` (the `write` token is the io_write source attribution — the source blamed, not just a stalling victim), and a blast radius, with no resource threshold in the path.
 
 **Deeper check — per-pod psi_io and the onsets the engine detects:**
 
@@ -224,8 +226,12 @@ kubectl port-forward svc/api -n aiops 8088:8088
 | `GET /api/pods` | hot-sorted per-workload snapshot + `anomalous` flag |
 | `GET /api/signal/{pod}?signal=psi_io` | one workload's (ts, value) series |
 | `GET /api/events` | L2 anomaly-candidate stream |
+| `GET /api/narrative` | one-line verdict in prose (gemma4; deterministic fallback; OOM forecast woven in) |
+| `GET /api/topology` | eBPF-discovered service map (Caretta) |
+| `GET /api/recommendations` | right-sizing in KAI verbs + per-namespace fairness (PS-Q4) |
 | `GET /api/scenarios` | scenario catalogue |
-| `POST /api/scenarios/S1/trigger` | fire S1 over HTTP |
+| `POST /api/scenarios/{id}/trigger` | fire S1 / S2 / S5 (via a bounded ServiceAccount) |
+| `POST /api/scenarios/{id}/reset` | reset S2 / S5 |
 | `GET /api/health` | upstream L2/L3 reachability |
 
 ```bash
@@ -279,20 +285,21 @@ bash appendix/diag_scrape.sh    # per-job scrape health
 |-------|-------|
 | P0 environment (kernel, K3s, PSI gate) | Complete |
 | P1 factory (15 pods) | Complete (8-hour soak, no unplanned restarts) |
-| P2 telemetry (Prometheus, Loki, eBPF collectors) | Core taps live (15 of 15 PASS); Loki + eBPF collectors deferred |
-| P3 aggregator (L2) | Deployed to namespace `aiops`; emits schema-conformant events on S1 |
-| P4 correlation engine (L3) | Complete + stateful R&D (LOG-059→063): workload-keyed persistent memory, `io_write` source attribution (writer→staller), learned structural baseline, deviation-gated detection (**S0 silent**), case-family similarity merge. On S1 root = cooling-monitor; 30 unit tests (13 kernel fixtures intact). One known residual + the P5–P8 roadmap in `REMAINING.md` |
-| P5 language (Ollama narrator) | Done — `/api/narrative` renders the verdict via local **gemma4** with a deterministic template fallback (LOG-064/066) |
-| P6 dashboard (L4) | Done — Next.js launcher: **3D causal graph**, gemma4 verdict, blast radius, scenario console, embedded Grafana PSI panel; per-component NodePorts over Tailscale (LOG-064→066) |
-| P7 scenarios (S2–S5), P8 hardening | Planned; Loki logs panel pending the alloy→promtail fix |
+| P2 telemetry (Prometheus, PSI, eBPF) | Prometheus/PSI/node-exporter/kube-state live; **Caretta eBPF** service map live; Loki/Alloy partial |
+| P3 aggregator (L2) | Deployed to `aiops`; emits schema-conformant events; serves the 15-min `/window` |
+| P4 correlation engine (L3) | Complete + stateful, **multi-signal** (psi_io/cpu/mem): workload-keyed persistent memory, `io_write` source attribution (writer→staller), learned baselines (**S0 silent**), case-family merge, OOM forecaster. On S1 root = cooling-monitor; 47 unit tests (13 `run_pass` fixtures intact) |
+| P5 language (gemma4 narrator) | Done — `/api/narrative` via local **gemma4** (`e4b-it-qat`, `keep_alive`), deterministic fallback, OOM forecast woven into the incident verdict |
+| P6 dashboard (L4) | Done — 3D causal graph over the eBPF topology, AI insight feed, recommendations + fairness, blast radius, Grafana PSI; **scenario console** S1/S2/S5 fire + reset |
+| P7 scenarios | **S0/S1/S5 live**; S2 fires (distinct-root tuning is mark-two — see forward plan); S3 (CPU) / S4 (network) out of scope by physics/Chaos-Mesh |
+| P8 hardening / air-gap / report | Post-submission |
 
 ## Documentation
 
 - [QUICKSTART.md](QUICKSTART.md): clone-to-running on a fresh Linux PC.
+- [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md): the live demo — press-this/say-this for S0 → S1 → S5, with honest answers to the four judge questions.
 - [EXPLANATIONS.md](EXPLANATIONS.md): how it works, file by file, end to end.
 - [MASTER_PLAN.md](MASTER_PLAN.md): architecture, design decisions, and methodology.
-- [BUILD_GUIDE.md](BUILD_GUIDE.md): phase-by-phase build path (P0 to P8) with completion criteria.
-- [BUILD_LOG.md](BUILD_LOG.md): append-only build journal and decision register.
+- [DESIGN_stateful_engine_and_case_library.md](DESIGN_stateful_engine_and_case_library.md): the stateful memory + case library.
 
 ## Team
 

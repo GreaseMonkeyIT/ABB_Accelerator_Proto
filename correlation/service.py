@@ -37,7 +37,7 @@ SIGNAL_SOURCES = {"psi_io": "io_write", "psi_cpu": "cpu"}
 FORECAST_SIGNAL = os.environ.get("FORECAST_SIGNAL", "mem")           # working_set bytes: the OOM ramp
 FORECAST_LIMIT  = os.environ.get("FORECAST_LIMIT", "mem_limit")      # memory limit (kube-state): the cap
 FORECAST_HORIZON_S = float(os.environ.get("FORECAST_HORIZON_S", "900"))  # warn only if OOM is within this window
-FORECAST_MIN_FRAC  = float(os.environ.get("FORECAST_MIN_FRAC", "0.6"))   # warn only once working_set is past this fraction of the limit (drops transient/low-level climbs)
+FORECAST_MIN_FRAC  = float(os.environ.get("FORECAST_MIN_FRAC", "0.5"))   # warn only once working_set is past this fraction of the limit (drops transient/low-level climbs); 0.5 = S5-verified earlier card (LOG-093), do not go lower (re-admits the LOG-087 false cards)
 INTERVAL   = int(os.environ.get("ENGINE_INTERVAL", "10"))        # seconds between passes
 PORT       = int(os.environ.get("ENGINE_PORT", "9100"))
 COPR_MIN   = float(os.environ.get("COPRESSURE_MIN", "0.10"))     # signal level that counts as "stalled"

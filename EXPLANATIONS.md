@@ -222,7 +222,7 @@ The deterministic detective. **No LLM anywhere in this layer.** Five ideas, five
   deterministic "steady" line — or a model-free "OOM in ~Ns" forecast line when a leak is climbing —
   and skips the model**; an actual model failure falls back to a template), `/api/topology` (the Caretta-discovered
   service map), `/api/recommendations` (right-sizing in KAI verbs + per-namespace fairness Gini —
-  PS-Q4), `/api/pods`, `/api/events`, `/api/scenarios` (+ POST S1 trigger).
+  PS-Q4), `/api/pods`, `/api/events`, `/api/scenarios` (+ POST `{id}/trigger` and `{id}/reset` for S1/S2/S5 via a bounded ServiceAccount).
 - **`dashboard/`** — Next.js static export served by nginx (reverse-proxies `/api/`). ONE **unified
   causal graph** (`Graph.jsx`): the eBPF-discovered topology backbone (thin grey) with causal edges
   overlaid (hot/thick on a live incident), re-laying-out only on a structural change. Plus the gemma4
