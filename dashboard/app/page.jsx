@@ -4,6 +4,8 @@ import dynamic from "next/dynamic";
 
 // React Flow touches `window`, so it must render client-only (never during static prerender).
 const Graph = dynamic(() => import("./Graph"), { ssr: false });
+// Live allocated-vs-consuming per pod (polls /api/pod-resources same-origin).
+const PodResources = dynamic(() => import("./PodResources"), { ssr: false });
 
 // Each backend component is exposed on its own NodePort so it can be tested individually from the
 // laptop before anything is embedded. Links resolve against whatever host you loaded this page from
@@ -217,6 +219,10 @@ export default function Page() {
           ) : (
             <div style={{ color: "var(--text-faint)" }}>{recs?.source === "unavailable" ? "Prometheus unavailable" : "all workloads right-sized"}</div>
           )}
+        </Panel>
+
+        <Panel span={12} title="Pod resources" sub="allocated vs live · CPU & memory · updates 5s">
+          <PodResources />
         </Panel>
 
         <Panel span={6} title="Blast radius">

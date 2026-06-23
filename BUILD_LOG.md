@@ -1132,3 +1132,75 @@ widget; rehearsal ledger; A2 Log Detective (Loki); A5 bounded tool calls.
 **NEXT SESSION with this folder is DOCS-ONLY (operator intent):** author a full README + a "book" — a comprehensive
 internal reference the team can read/refer to anytime. NOT more build/box work. **Session closed here.**
 Links: LOG-094/099/100/101 (this run); EXPLANATIONS.md (as-built map); README.md, MASTER_PLAN.md.
+
+## LOG-103 · 2026-06-22 · NOTE (DOCS session) — BOOK.md authored + competitive positioning + remedy-agents roadmap
+What: The DOCS-ONLY session (per LOG-102). (1) Authored **`BOOK.md`** — a single-file, plain-language, from-scratch
+internal reference (audience = primarily non-CS teammates): Part 0 primer → Part 6 honest record + appendices; README
+Documentation section links it first. (2) After a comparison vs a peer ABB entry (**NexOps / "Penguins"** — an IIoT
+predictive-maintenance app: per-machine online Isolation Forest on *scripted* sensor data, cloud ARIA chatbot,
+technician-dispatch, polished 3-role UI), captured the positioning: we are a different/harder CLASS — **causal
+attribution (who caused whom) on REAL kernel faults**, not per-entity **anomaly** on **scripted** data; dependency
+mapping falls out of ours and is structurally absent from theirs; local LLM (air-gap) vs their cloud LLM. Added **BOOK
+§1.4** (anomaly-vs-causal + real-vs-scripted, and the *principled* stance that real data is inherently harder to
+run/demo — we own it, can't "fix" it without abandoning real data). (3) **Addressed the one real gap (their
+"what-to-do-next" dispatch) WITHOUT building anything** — a forward roadmap: a **fine-tuned narrator → bounded "remedy
+agents"** closed loop (each agent = one KAI-style verb incl. *restrict* verbs throttle/qos-demote/cordon; least-priv
+RBAC; dry-run/approval/rate-limit/blast-cap/rollback; cite-or-die intent from a closed vocab). Preserves D-002 (engine
+decides WHAT is wrong; model only extracts a bounded intent; never the diagnosis). Extends A5 read-only → bounded write.
+Gated on the rehearsal-ledger accuracy + confidence gate; only `page-human` runs human-free until then. Written to
+**BOOK §6.5** (team-readable) and **MASTER_PLAN §6** (architecture spec, new dedicated section before Appendix A).
+Operator intent this session: **no product/code change** — positioning + roadmap docs only; ease-of-running &
+demo-reliability are accepted as inherent costs of real data (not to be "improved").
+Impact: docs only (BOOK.md new; MASTER_PLAN.md +§6; README.md +1 link; this entry). No rebuild. **Uncommitted on
+mark-one** — commit when the operator asks. NOT in the public Submission repo unless the operator copies it over.
+Links: LOG-102 (docs-only handoff), D-002 (one-LLM rule), §1.4.1 A5 / §1.5 language / §1.5.6 recommendations / §4.1
+KAI verbs / §4.3 Koordinator QoS; BOOK.md §1.4+§6.5, MASTER_PLAN.md §6, README.md.
+
+## LOG-104 · 2026-06-22 · STEP (new tooling) — `soak/` stress-test recorder + self-contained HTML report
+What: Added a read-only **soak / stress-test harness** (operator wants a multi-hour real-fault run as evidence; "like
+powercfg /batteryreport"). New folder `soak/`: `soak.sh` (loop: baseline→FIRE Sx→observe→reset→cooldown, cycling
+`S1 S2 S3 S5` for `DURATION_H` hours, default 3), `record.py` (flattens each `/api/graph` snapshot → samples.jsonl +
+timeline.csv; builds report), `report_template.html` (simplified dashboard — Grafana-dark palette lifted from
+dashboard/app/globals.css, **vanilla SVG, no external libs → offline/air-gap clean**), `README.md`, `.gitignore`
+(runs/, __pycache__). Faults fire via the canonical `scenarios/<id>/trigger.sh` (S1 FLUSH flag, S2 log-archiver-s2 Job,
+S3 s3-run-<ts> Job, S5 LEAK_ENABLED); resets inlined so cooldown is still sampled. Data fetched via the **kubectl
+service proxy** (`/api/v1/namespaces/aiops/services/api:8088/proxy/api/graph`) — no port-forward/NodePort assumption;
+`API_BASE=http://localhost:8088` switches to curl. Deps: bash + kubectl + python3 only. Captures root/score/onset_s,
+edges, evidence, findings, **incipient OOM eta** (S5), narrative (sparse, every Nth). Report = stat tiles + per-scenario
+outcome (expected vs ACTUAL dominant root, correct-rate, median time-to-detect; S5 = OOM-forecast-fired rate + best
+ETA) + a phase-ribbon timeline (detection dots green=matched/red=mismatched, OOM ticks, edge/finding lines) + event log.
+**Honest by construction:** shows the real verdict, so S2 mis-root + S3 physics-quiet appear as-is. Smoke-tested on
+Windows python (append→report end-to-end; S1 correct=1.0, S2 dominant=cooling-monitor correct=0.0, S3 detect=0, S5
+oom_rate=1.0 eta 3s); `bash -n` + `py_compile` clean. Reads/triggers only — **changes nothing in the product** (engine/
+api/dashboard untouched; no rebuild). Trap builds the report on Ctrl-C too.
+Impact: new `soak/` tooling, uncommitted on mark-one. Run ON THE BOX after the ~15-20min warm-up (S0 silent first).
+Links: api/main.py (/api/graph shape, scenario triggers), scenarios/S{1,2,3,5}/{trigger,reset}.sh, dashboard/app/
+globals.css (palette), LOG-099 (S2 mis-root this captures honestly), BOOK §4.2 (scenario status).
+
+## LOG-105 · 2026-06-23 · STEP — live "allocated vs consuming" per-pod view: standalone HTML + dashboard panel + API endpoint
+What: Operator wanted a simple live view of each pod's **allocated** resources (CPU/mem requests+limits) vs **real-time
+consumption**, on a window that scrolls with time. Built in two stages.
+(1) **Standalone** `tools/pod-resources.html` (+ `tools/README.md`): one self-contained page (vanilla JS + inline SVG,
+no libs, Grafana-dark from globals.css — same offline-clean pattern as soak/). Per-pod card: req/lim labels + live
+`used` + a limit-scaled bar (purple=request marker; green<70%/orange70-90/red≥90% of limit) + a scrolling sparkline
+(client-side ring buffer = the moving window). Config (Prom base URL, namespace regex default `factory-.*`, refresh,
+window, sort, pause) persisted to localStorage. It reads Prometheus **directly** → needs a port-forward AND Prom CORS;
+operator could NOT verify it either way (browser→Prom is the fragile part). Emoji dropped from the title per operator.
+(2) **The simpler wiring (embed):** the dashboard is single-origin — nginx proxies `/api/` to the in-cluster API
+(nginx.conf), so the browser needs no CORS/port-forward. Added a read-only **`GET /api/pod-resources`** to api/main.py
+(new `_prom_pod_map` keyed by full pod name; SAME metrics as /api/recommendations — kube_pod_container_resource_
+{requests,limits}, rate(container_cpu_usage_seconds_total[1m]), container_memory_working_set_bytes; `namespace`
+query-param default `factory-.*`; returns raw numbers, `source:unavailable` if Prom down; writes nothing). New
+dashboard component `dashboard/app/PodResources.jsx` polls it every 5s (same-origin) + keeps the moving-window ring
+buffer client-side; wired into page.jsx as a span-12 "Pod resources" panel (dynamic import, ssr:false) between
+Recommendations and Blast radius.
+Verify: `python -m py_compile api/main.py` ✓; `cd dashboard && npm run build` ✓ (the exact Dockerfile step — compiles,
+4 static pages export). Rendering confirmed in a browser preview with mocked data (standalone + embedded panel): cards/
+bars/markers/sparklines/colors correct, `lim —` + auto-scaled bar for no-limit pods, graceful "Prometheus unavailable".
+Impact: **needs a box rebuild of BOTH images** to go live — `skn/api:v0.1` (new endpoint) and `skn/dashboard:v0.1`
+(new panel): docker build → `sudo k3s ctr images import -` → `kubectl rollout restart deploy/{api,dashboard} -n aiops`.
+`run_pass` engine purity untouched (API-only change). Uncommitted on mark-one. `.claude/launch.json` = laptop preview
+helper only, do NOT commit.
+Links: api/main.py (`/api/recommendations` _prom_map precedent, `workload()`), dashboard/{nginx.conf (single-origin /api
+proxy), app/page.jsx, app/PodResources.jsx, app/globals.css}, deploy/{api,dashboard}.yaml (image coords/ns), tools/
+pod-resources.html, LOG-104 (soak — same vanilla-SVG/no-libs tooling pattern).

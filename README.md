@@ -303,6 +303,7 @@ bash appendix/diag_scrape.sh    # per-job scrape health
 
 ## Documentation
 
+- [BOOK.md](BOOK.md): **the complete plain-language reference** — the whole system from scratch (no Kubernetes background assumed): architecture, how the engine reasons, how to run it, the honest scenario status, and the decision history. Start here.
 - [QUICKSTART.md](QUICKSTART.md): clone-to-running on a fresh Linux PC.
 - [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md): the live demo — press-this/say-this for S0 → S1 → S5, with honest answers to the four judge questions.
 - [EXPLANATIONS.md](EXPLANATIONS.md): how it works, file by file, end to end.

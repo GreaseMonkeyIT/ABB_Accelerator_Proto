@@ -603,6 +603,88 @@ Steals (already embedded above, credited here):
 
 ---
 
+## 6. Closed-loop remediation — fine-tuned narrator + bounded remedy agents (roadmap)
+
+> **Status: ROADMAP / design spec — NOT built (added 2026-06-22).** This section is the
+> architecture-level answer to the one gap a productized peer (e.g. a predictive-maintenance app with
+> human-dispatch) has that we don't: the **act** step of the operations loop. It extends — never
+> contradicts — D-002 ("deterministic core, one LLM at the edge") and §1.4.1's A5 Orchestrator
+> (today: read-only bounded tool-calls). The team-readable version is in `BOOK.md` §6.5.
+
+### 6.1 Motivation — the third step of the loop
+
+A complete operations tool does three things: **explain** (root cause), **recommend** (the fix), and
+**act** (apply it, safely). We ship the first two: L3 produces the deterministic causal verdict
+(explain); §1.5.6 / §0-Q4 produce right-sizing + fairness cards in KAI scheduler verbs (recommend).
+The missing third step is **act**. Our differentiator for *safe* actuation is structural: **we act on
+a deterministically-identified cause, not on a per-entity anomaly flag.** Automated remediation is
+irresponsible on "this looks abnormal"; it becomes defensible on "*this* workload is the root, with
+this evidence chain and this confidence." Causality is the licence to act.
+
+### 6.2 Architecture — remedy agents behind a fine-tuned intent layer
+
+A **remedy agent** is a small, single-capability actuator that can perform — or **restrict** — exactly
+one class of operation, behind hard guardrails. The action vocabulary is the KAI-verb set (§4.1)
+extended with constraining and escalation verbs:
+
+| Remedy agent | Operation | Class |
+|---|---|---|
+| `throttle` | Tighten the aggressor's CPU/IO limits temporarily | restrict |
+| `qos-demote` | Drop a best-effort hog below latency-sensitive pods (Koordinator LS/BE, §4.3) | restrict |
+| `cordon` / `evict` | Fence / relocate a noisy neighbour off the contended node | restrict |
+| `resize` / `reclaim` | Right-size requests/limits toward measured p95 | adjust |
+| `restart` | Recycle a pod in a confirmed leak/flap (A1 class) | adjust |
+| `page-human` | Escalate to on-call with the full causal evidence chain | escalate (safe default) |
+
+The "restrict" verbs are the operationally important half: when one pod is harming others, the correct
+response is usually to *constrain the offender* (throttle / demote / fence), not to scale the victim.
+
+**Pipeline (strict separation of concerns, preserving D-002):**
+
+```
+[L3 deterministic engine] --verdict+confidence--> [fine-tuned intent layer] --bounded intent(+evidence)-->
+        (decides WHAT is wrong)                    (picks ONE verb from a CLOSED set, cite-or-die)
+   --> [guardrail / policy gate] --approved--> [remedy agent: least-privilege RBAC, one verb]
+                                  --denied / low-conf--> page-human only
+```
+
+1. **Diagnosis stays deterministic.** The engine owns the causal verdict and the §1.4.6 confidence
+   gate. The model gets no vote on *what broke*.
+2. **A fine-tuned narrator/orchestrator extracts a bounded intent.** It selects one action from a
+   **fixed, closed vocabulary** and fills its parameters; it cannot emit an out-of-vocabulary action,
+   and every proposed action must cite ≥1 evidence ID (extends §1.5's cite-or-die from prose to
+   actions). **Why fine-tune (vs. the current zero-shot prompt):** a small model tuned on our own
+   `verdict → intent` pairs makes constrained extraction reliable (low malformed/out-of-set rate) and
+   keeps it **local / air-gapped** — the opposite of a cloud-LLM dispatch.
+3. **Remedy agents execute within hard rails.** Each agent runs under a least-privilege ServiceAccount
+   (its one verb, nothing else) with: **dry-run by default**, a **human-approval gate** for destructive
+   verbs, **rate limits**, a **blast-radius cap**, and **automatic rollback** if the verdict does not
+   improve within a bounded window. The system proposes; a human or a strict policy disposes.
+
+### 6.3 Relationship to prior decisions and to the competitive story
+
+- **Extends A5 (§1.4.1) read-only → bounded write.** The A5 Orchestrator's 3 read-only tool-calls
+  (`get_pod_events`, `get_recent_restarts`, `top_blockio`) become the read half of a HolmesGPT-style
+  loop; remedy agents add a *governed* write half.
+- **Preserves D-002.** The reasoning core remains deterministic and replayable; the LLM's expanded
+  role (now intent-extraction, not just narration) is still bounded, cited, and never the diagnosis.
+- **The causal answer to human-dispatch.** A maintenance app routes a *technician* to a *machine* on
+  skills/shift. We route a *bounded remedy* (or an approval request) to the *causally-identified root
+  pod* — one level deeper: not "who do I send," but "what is the smallest safe action on the actual
+  culprit, and shall I take it?" Same operator need, answered on a known cause.
+
+### 6.4 Gating (do not build until)
+
+Automated actuation is responsible only once: (a) the **rehearsal ledger** (§5.4, D-004) gives a
+precision/recall number high enough to trust the verdict, and (b) the **confidence gate** reliably
+suppresses low-certainty verdicts. Until both hold, the only agent permitted to run without a human in
+the loop is `page-human`. New work touches: a new `correlation/` or `api/` actuation seam, per-verb
+RBAC ServiceAccounts, a policy/guardrail module, and a fine-tune dataset of `verdict → intent` pairs
+harvested from the ledger. **None of this is in the submission build** — it is the post-mark-two
+direction.
+
+---
+
 ## Appendix A — Metric cheat sheet (PromQL fragments)
 
 ```promql

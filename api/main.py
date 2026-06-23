@@ -165,6 +165,29 @@ def _prom_map(q):
     return out
 
 
+def _prom_pod_map(q):
+    """Instant PromQL -> {(namespace, pod): summed float}, keyed by the *full* pod name (unlike
+    _prom_map which collapses to workload). Used by /api/pod-resources so each replica is its own
+    row. Empty on any failure (graceful)."""
+    out = {}
+    try:
+        r = _get(PROM + "/api/v1/query?query=" + urllib.parse.quote(q))
+    except Exception:
+        return out
+    for s in (r.get("data") or {}).get("result") or []:
+        m = s.get("metric", {})
+        ns, pod = m.get("namespace"), m.get("pod")
+        if not ns or not pod:
+            continue
+        try:
+            v = float(s.get("value", [0, 0])[1])
+        except Exception:
+            continue
+        k = (ns, pod)
+        out[k] = out.get(k, 0.0) + v
+    return out
+
+
 def _fmt_cpu(c):
     return f"{round(c * 1000)}m" if c < 1 else f"{round(c, 2)} CPU"
 
@@ -479,6 +502,37 @@ def recommendations():
         for k, v in _prom_map(q_psi).items():
             stall[k] = stall.get(k, 0.0) + v
     return {"right_sizing": cards, "fairness": _fairness(stall), "source": "prometheus"}
+
+
+@app.get("/api/pod-resources", tags=["telemetry"])
+def pod_resources(namespace: str = "factory-.*"):
+    """Per-pod **allocated vs live** snapshot: CPU/memory requests + limits next to current usage
+    (CPU cores from a 1m rate; memory working-set bytes), straight from Prometheus. Raw numbers —
+    the frontend formats and charts them on a moving window. `source: unavailable` if Prometheus
+    is down. Reuses the same metrics as /api/recommendations; nothing is written."""
+    sel = f'namespace=~"{namespace}"'
+    q = {
+        "cpu_req": f'sum by(namespace,pod)(kube_pod_container_resource_requests{{{sel},resource="cpu"}})',
+        "cpu_lim": f'sum by(namespace,pod)(kube_pod_container_resource_limits{{{sel},resource="cpu"}})',
+        "cpu_use": f'sum by(namespace,pod)(rate(container_cpu_usage_seconds_total{{{sel},container!=""}}[1m]))',
+        "mem_req": f'sum by(namespace,pod)(kube_pod_container_resource_requests{{{sel},resource="memory"}})',
+        "mem_lim": f'sum by(namespace,pod)(kube_pod_container_resource_limits{{{sel},resource="memory"}})',
+        "mem_use": f'sum by(namespace,pod)(container_memory_working_set_bytes{{{sel},container!=""}})',
+    }
+    maps = {k: _prom_pod_map(v) for k, v in q.items()}
+    if not any(maps.values()):
+        return {"pods": [], "source": "unavailable"}
+    keys = set().union(*[set(m) for m in maps.values()])
+    pods = []
+    for (ns, pod) in sorted(keys):
+        pods.append({
+            "namespace": ns, "pod": pod, "workload": workload(pod),
+            "cpu": {"request": maps["cpu_req"].get((ns, pod)), "limit": maps["cpu_lim"].get((ns, pod)),
+                    "usage": round(maps["cpu_use"].get((ns, pod), 0.0), 4)},
+            "mem": {"request": maps["mem_req"].get((ns, pod)), "limit": maps["mem_lim"].get((ns, pod)),
+                    "usage": round(maps["mem_use"].get((ns, pod), 0.0))},
+        })
+    return {"pods": pods, "source": "prometheus"}
 
 
 @app.get("/api/scenarios", tags=["scenarios"])
