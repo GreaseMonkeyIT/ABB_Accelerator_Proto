@@ -1,17 +1,25 @@
-/* Grafana-like dark theme (colors approximate Grafana's default dark palette). */
+/* VISR theme — a restrained Halo "VISR" reskin layered over the original Grafana-like dark base.
+   Clarity is the product, Halo is the accent (~90/10). The chrome palette is aligned to the 3D
+   causal graph's meaning-colors (app/Graph.jsx): red = source/root · amber = victim · teal = healthy.
+   Cyan is the single UI accent. Body/data text stays Inter for readability; the condensed industrial
+   face (--display) is used only for HUD chrome (brand, panel heads, stat values, micro-labels). */
 :root {
-  --bg: #111217;
-  --panel: #181b1f;
+  --bg: #0e1217;
+  --panel: #181b1f;        /* matches the 3D graph canvas bg, so the embed is seamless */
   --panel-hover: #1f2127;
   --border: rgba(204, 204, 220, 0.12);
   --text: #ccccdc;
   --text-weak: rgba(204, 204, 220, 0.65);
   --text-faint: rgba(204, 204, 220, 0.4);
-  --blue: #6e9fff;
-  --green: #73bf69;
-  --red: #f2495c;
-  --orange: #ff9830;
-  --purple: #b877d9;
+  --red: #f2495c;          /* source / root cause */
+  --orange: #ff9830;       /* victim / affected */
+  --green: #5dcaa5;        /* healthy / steady (teal — matches the graph's "normal" node) */
+  --blue: #36c5e0;         /* cyan — the single accent (name kept; referenced across page.jsx) */
+  --purple: #b877d9;       /* request marker (neutral) */
+  --accent: var(--blue);
+  /* --font-display is provided by next/font (layout.jsx); fallback stack here if it's ever unset. */
+  --display: var(--font-display, "Bahnschrift", "DIN Alternate", "Arial Narrow", sans-serif);
+  --mono: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -39,7 +47,7 @@ a { color: var(--blue); }
   top: 0;
   z-index: 10;
 }
-.topbar .title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.topbar .title { font-family: var(--display); font-size: 17px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
 .topbar .meta { display: flex; align-items: center; gap: 16px; color: var(--text-weak); font-size: 12px; }
 
 /* 12-column panel grid, like a Grafana dashboard */
@@ -55,29 +63,45 @@ a { color: var(--blue); }
 }
 .panel > .head {
   padding: 8px 10px;
+  font-family: var(--display);
   font-size: 13px;
   font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
   border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
-.panel > .head .sub { font-weight: 400; color: var(--text-weak); font-size: 11px; }
+.panel > .head .sub { font-family: var(--mono); text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text-weak); font-size: 11px; }
 .panel > .body { padding: 10px; flex: 1; min-height: 0; }
 
 /* Grafana-style stat tile */
 .stat { align-items: center; justify-content: center; text-align: center; padding: 16px 8px; }
-.stat .v { font-size: 30px; font-weight: 600; line-height: 1.1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stat .l { font-size: 11px; color: var(--text-weak); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 6px; }
+.stat .v { font-family: var(--display); font-size: 30px; font-weight: 600; line-height: 1.1; letter-spacing: 0.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat .l { font-family: var(--mono); font-size: 11px; color: var(--text-weak); text-transform: uppercase; letter-spacing: 1px; margin-top: 6px; }
 
 .pill { display: inline-flex; align-items: center; gap: 6px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.chip { padding: 2px 8px; border-radius: 10px; font-size: 11px; background: rgba(110, 159, 255, 0.15); color: var(--blue); border: 1px solid rgba(110, 159, 255, 0.3); }
+.chip { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-family: var(--mono); background: rgba(54, 197, 224, 0.13); color: var(--blue); border: 1px solid rgba(54, 197, 224, 0.32); }
 
 .btn { background: #22252b; color: var(--text); border: 1px solid var(--border); border-radius: 3px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
 .btn:hover { background: var(--panel-hover); }
-.btn-primary { background: #3d71d9; border-color: #3d71d9; color: #fff; }
-.btn-primary:hover { background: #4c80e8; }
+.btn-primary { background: #15909f; border-color: #15909f; color: #04161a; font-weight: 600; }
+.btn-primary:hover { background: #1aa9bb; border-color: #1aa9bb; }
 
 .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); }
 .row:last-child { border-bottom: none; }
+
+/* thin corner brackets — applied to the primary element only (the Verdict panel) */
+.bracketed { position: relative; }
+.bracketed::before,
+.bracketed::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+}
+.bracketed::before { top: -1px; left: -1px; border-top: 1.5px solid var(--accent); border-left: 1.5px solid var(--accent); }
+.bracketed::after { bottom: -1px; right: -1px; border-bottom: 1.5px solid var(--accent); border-right: 1.5px solid var(--accent); }

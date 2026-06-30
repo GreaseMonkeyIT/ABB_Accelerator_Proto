@@ -99,7 +99,7 @@ export default function Page() {
   return (
     <>
       <div className="topbar">
-        <div className="title">▣ SiliconKnights · Causal AIOps</div>
+        <div className="title">▣ VISR · Causal AIOps</div>
         <div className="meta">
           <span className="pill">
             <span className="dot" style={{ background: health ? (health.ok ? "var(--green)" : "var(--red)") : "var(--text-faint)" }} />
@@ -144,7 +144,7 @@ export default function Page() {
         <Stat label="Causal edges" value={meta.accepted_edges ?? graph?.edges?.length ?? "—"} />
         <Stat label="Root cause" value={root ? root.pod : "none"} color={root ? "var(--red)" : "var(--green)"} small />
 
-        <Panel span={12} title="Verdict" sub={narr ? (narr.source === "llm" ? "gemma4" : narr.source === "steady" ? "steady" : narr.source === "forecast" ? "forecast" : "template fallback") : ""}>
+        <Panel span={12} title="Verdict" className="bracketed" sub={narr ? (narr.source === "llm" ? "gemma4" : narr.source === "steady" ? "steady" : narr.source === "forecast" ? "forecast" : "template fallback") : ""}>
           <div style={{ fontSize: 18, lineHeight: 1.5 }}>{narr?.text || "…"}</div>
           {root && (
             <div style={{ marginTop: 8, color: "var(--text-weak)" }}>
@@ -265,9 +265,9 @@ function Stat({ label, value, color, small }) {
   );
 }
 
-function Panel({ span, title, sub, children, bodyStyle }) {
+function Panel({ span, title, sub, children, bodyStyle, className = "" }) {
   return (
-    <div className="panel" style={{ gridColumn: `span ${span}` }}>
+    <div className={`panel ${className}`} style={{ gridColumn: `span ${span}` }}>
       <div className="head">
         {title}
         {sub ? <span className="sub">{sub}</span> : null}
